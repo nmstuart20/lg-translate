@@ -1,0 +1,21 @@
+[package]
+name = "lg-translate"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+hf-hub = "0.4"
+tokenizers = "0.23.1"
+
+# Keep the Candle crates on the same revision/API.
+candle-core = { git = "https://github.com/huggingface/candle.git", package = "candle-core" }
+candle-nn = { git = "https://github.com/huggingface/candle.git", package = "candle-nn" }
+candle-transformers = { git = "https://github.com/huggingface/candle.git", package = "candle-transformers" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
