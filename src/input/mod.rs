@@ -1,47 +1,26 @@
-//! Turning what a US keyboard can type into what the models expect.
+//! Getting non-Latin text into the prompt from a US keyboard.
 //!
 //! Two jobs live here:
 //!
 //! * [`detect`] classifies a line by script so a line that already contains
 //!   Hangul or Cyrillic (pasted, or typed with an OS IME) routes itself to the
 //!   right model without a command.
-//! * [`InputMode::Roman`] converts ASCII romanization into Hangul or Cyrillic,
-//!   so the models are reachable with nothing but the keys already on the
-//!   keyboard.
+//! * [`editor`] reads the prompt with a symbol palette attached, so the arrow
+//!   keys can find and insert letters the keyboard has no key for. There is no
+//!   mapping from Latin letters to pick apart: what you see in the grid is what
+//!   goes into the line.
 
-pub mod cyrillic;
+pub mod editor;
 pub mod hangul;
+pub mod palette;
+
+use unicode_width::UnicodeWidthChar;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Script {
     Latin,
     Cyrillic,
     Hangul,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum InputMode {
-    /// Pass typed text through untouched (for an OS IME, or pasted text).
-    Raw,
-    /// Interpret ASCII as romanized text and convert it to the target script.
-    Roman,
-}
-
-impl InputMode {
-    pub fn name(self) -> &'static str {
-        match self {
-            InputMode::Raw => "raw",
-            InputMode::Roman => "roman",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "raw" => Some(InputMode::Raw),
-            "roman" | "romanized" => Some(InputMode::Roman),
-            _ => None,
-        }
-    }
 }
 
 /// Which script a line is *already* written in.
@@ -71,14 +50,14 @@ pub fn detect(text: &str) -> Script {
     }
 }
 
-/// Convert romanized ASCII into `script`. Returns the input unchanged for
-/// `Script::Latin`, which needs no conversion.
-pub fn romanize(script: Script, text: &str) -> String {
-    match script {
-        Script::Latin => text.to_string(),
-        Script::Cyrillic => cyrillic::from_roman(text),
-        Script::Hangul => hangul::from_roman(text),
-    }
+/// Terminal columns `ch` occupies. Hangul is double-width and Cyrillic is not,
+/// so the palette and the cursor both need this to line up.
+pub fn display_width_char(ch: char) -> usize {
+    ch.width().unwrap_or(0)
+}
+
+pub fn display_width(text: &str) -> usize {
+    text.chars().map(display_width_char).sum()
 }
 
 #[cfg(test)]
@@ -92,5 +71,14 @@ mod tests {
         assert_eq!(detect("안녕하세요"), Script::Hangul);
         // Mixed lines route by the non-Latin content they contain.
         assert_eq!(detect("say 안녕 to them"), Script::Hangul);
+        // A jamo left standing at the end of a line still reads as Korean.
+        assert_eq!(detect("ㄱ"), Script::Hangul);
+    }
+
+    #[test]
+    fn measures_double_width_scripts() {
+        assert_eq!(display_width("hi"), 2);
+        assert_eq!(display_width("привет"), 6);
+        assert_eq!(display_width("한국"), 4);
     }
 }

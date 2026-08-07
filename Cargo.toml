@@ -6,9 +6,11 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+crossterm = "0.29"
 hf-hub = "0.4"
 serde_json = "1"
 tokenizers = "0.23.1"
+unicode-width = "0.2"
 
 # Keep the Candle crates on the same revision/API.
 candle-core = { git = "https://github.com/huggingface/candle.git", package = "candle-core" }

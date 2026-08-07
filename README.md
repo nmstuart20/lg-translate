@@ -2,105 +2,89 @@
 
 A lightweight language translation utility.
 
-| Pair    | Direction          |
-| ------- | ------------------ |
-| `en-es` | English -> Spanish |
-| `ko-en` | Korean -> English  |
-| `ru-en` | Russian -> English |
+## Setup
 
-It opens as a persistent command-line REPL:
+All one-time. Budget about 300 MB per pair.
 
-```text
-Offline Translator
-English -> Spanish  [input: raw]
-Enter one line at a time. Press Ctrl-C to exit.
-Commands: /lang  /input  /help  /clear  /quit
+**1. Build**
 
-> Hello, how are you?
-Hola, ¿cómo estás?
-
-> Привет, как дела?
-Hey, how are you?
-
-> 한국어를 배우고 싶습니다
-I want to learn Korean.
-
->
+```bash
+cargo build --release
 ```
 
-A line containing Hangul or Cyrillic is routed to the matching model
-automatically, so pasted text and OS input methods need no command. Plain ASCII
-lines go to the *active* pair, which starts as `en-es` and is changed with
-`/lang`.
+**2. Install Python transformers and torch**
 
-The executable stays running until `Ctrl-C`, `/quit`, `/exit`, or EOF.
+`ko-en` and `ru-en` need a one-time conversion step, because their upstream
+repos ship their weights and tokenizers in formats this program can't read.
 
-## Typing Korean and Russian on a US keyboard
+You may need to create a python virtual environement.
 
-Switching to a pair whose input is not Latin turns on romanized input, so the
-models are reachable with nothing but the keys already on the keyboard. The
-converted text is echoed above the translation so a misparse is visible rather
-than silently mistranslated:
-
-```text
-> /lang ko-en
-Active pair: Korean -> English  [input: roman]
-
-> annyeonghaseyo
-  안녕하세요
-Hello.
-
-> /lang ru-en
-Active pair: Russian -> English  [input: roman]
-
-> ya lyublyu chitat' knigi.
-  я люблю читать книги.
-I like reading books.
-```
-
-`/input raw` turns the conversion off — for pasting real Korean or Russian, or
-for using the Windows Korean IME or Russian keyboard layout (`Win+Space`).
-`/input roman` turns it back on.
-
-### One-time Python step for ko-en and ru-en
-
-`en-es` needs nothing but the download. The other two do, because their upstream
-repositories are older and ship neither of the formats this program reads:
-
-- Their weights are only published as `pytorch_model.bin`, in the pre-1.6
-  PyTorch pickle format — a raw pickle stream rather than the ZIP container
-  Candle reads. They are re-saved as `model.safetensors`.
-- Their tokenizers are only published as `source.spm` / `target.spm` /
-  `vocab.json`. They are converted to `tokenizer.json`.
-
-`--download-model` runs `tools/convert_model.py` for this automatically when
-Python is available. Install its dependencies first:
-
-```powershell
+```bash
+python -m venv venv
+source venv/bin/activate
 pip install "transformers[sentencepiece]" protobuf
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 ```
 
-If Python is not on `PATH`, the download still fetches everything and leaves a
-copy of the script in the pair directory to run by hand:
+**3. Download the models.**
 
-```powershell
-python model\ko-en\convert_model.py model\ko-en
+```bash
+./lg-translate --download-model ko-en
+./lg-translate --download-model ru-en
 ```
 
-The script is idempotent, and everything it writes is portable — it can be run
-on one machine and the `model\` directory copied to another. **None of this is
-needed at translation time**; the built executable never calls Python.
+**4. Run it.**
 
-Once the model files exist, the machine can be disconnected from the internet.
+```bash
+./lg-translate
+```
+
+## Typing Korean and Russian on a US keyboard
+
+Press **Up** or **Down** at the prompt and the active script's alphabet opens
+under it. The arrow keys move the highlight, **Enter** drops the highlighted
+letter into the line, and **Esc** closes the grid and gives Enter back to the
+prompt. There is nothing to memorize — the letters you see are the letters you
+get:
+
+```text
+> /lang ru-en
+Active pair: Russian -> English
+
+> привет
+   а  б  в  г  д  е  ё  ж  з  и  й  к  л  м  н  о  п [р] с  т  у  ф  х  ц  ч
+   ш  щ  ъ  ы  ь  э  ю  я  А  Б  В  Г  Д  Е  Ё  Ж  З  И  Й  К  Л  М  Н  О  П
+   Р  С  Т  У  Ф  Х  Ц  Ч  Ш  Щ  Ъ  Ы  Ь  Э  Ю  Я
+  Russian · ↑↓←→ move · Enter insert · Esc close
+```
+
+The grid stays hidden until an arrow key asks for it, so commands and English
+are typed normally. Typing any character also closes it, which keeps
+`/lang ko-en` + Enter working without a detour.
+
+Korean is picked one jamo at a time and composed into syllables as you go, the
+way a Korean IME behaves — a consonant picked after a vowel becomes that
+syllable's coda, and the next vowel takes it back out to start a new syllable:
+
+```text
+ㅎ  ㅏ  ㄴ            ->  한
+ㄱ  ㅏ  ㅁ  ㅏ        ->  가마
+ㅇ ㅏ ㄴ ㄴ ㅕ ㅇ     ->  안녕
+```
+
+Backspace removes one jamo rather than the whole block (감 → 가 → ㄱ), so a
+wrong coda costs one keystroke. The palette lists the 19 onsets and 21 vowels;
+cluster codas (ㄳ, ㄺ, ㅄ …) form on their own from two consonants in a row.
+
+Pasting works too, as does an OS input method (the Windows Korean IME or
+Russian layout, `Win+Space`) — a line that already contains Hangul or Cyrillic
+is routed to the matching model whether you picked it, pasted it, or typed it.
 
 ## Commands
 
 ```text
 /lang <pair>    switch the active pair (en-es, ko-en, ru-en)
-/input roman    type Korean or Russian in ASCII
-/input raw      pass typed text through untouched
-/help           show pairs, commands, and the romanization tables
+/help           show pairs, commands, and the palette keys
 /clear          clear the terminal
 /quit           exit
 /exit
@@ -142,5 +126,9 @@ PairSpec {
   the same script is fine, but only the first is auto-routed — reach the other
   with `/lang`.
 
-A new non-Latin script also needs a converter under `src/input/` and a match arm
-in `input::romanize`, or it will only be usable in `/input raw`.
+A new non-Latin script also needs a `Script` variant, a range in
+`input::detect`, and a symbol list in `input::palette` — otherwise its lines
+will not route and its letters will not be pickable, leaving pasted text and an
+OS input method as the only way in. Scripts that compose (as Hangul does) need
+a module like `input::hangul` wired into `Buffer::insert_symbol`; alphabets that
+do not compose, like Cyrillic, need only the list.

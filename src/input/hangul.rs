@@ -1,321 +1,289 @@
-//! Revised-Romanization input for Korean.
+//! Composing picked jamo into Hangul syllables.
 //!
-//! Hangul syllables are laid out algorithmically in Unicode, so once a
-//! romanized syllable is broken into (onset, nucleus, coda) jamo indices the
-//! codepoint is arithmetic:
+//! The palette offers the 40 jamo people actually pick (19 onsets, 21 vowels),
+//! but Korean is written in syllable blocks, not letters in a row. This module
+//! is the automaton in between: each picked jamo either merges into the
+//! syllable being built or starts a new one, exactly as a 2-set IME behaves, so
+//! the line reads as Korean while it is typed.
+//!
+//! Syllables are laid out algorithmically in Unicode, so composing is
+//! arithmetic once the three slots are known:
 //!
 //! ```text
-//! U+AC00 + ((onset * 21) + nucleus) * 28 + coda
+//! U+AC00 + ((onset * 21) + vowel) * 28 + coda
 //! ```
 //!
-//! The work is the segmentation. Romanization is ambiguous about where one
-//! syllable ends and the next begins -- in `hangeul`, the `n` has to become the
-//! coda of 한 rather than the onset of the next syllable, while in `haseyo` the
-//! `s` has to do the opposite. Rather than guess with a heuristic we parse with
-//! backtracking: prefer no coda, fall back to the shortest coda that lets the
-//! rest of the word parse. Failed positions are memoized, so a word costs
-//! linear time in practice instead of exponential.
+//! Two rules carry most of the work, and both come from the fact that a
+//! consonant's role is only settled by what comes *after* it:
 //!
-//! Known limits, both inherent to romanization rather than to this parser:
+//! * A consonant picked after a complete syllable becomes that syllable's coda
+//!   (가 + ㅁ -> 감), because that is the reading that is still open to change.
+//! * A vowel picked next takes the coda back out and makes it the onset of a
+//!   new syllable (감 + ㅏ -> 가마), which is the only way 가마 can be typed.
 //!
-//! * Revised Romanization neutralizes final ㄱ/ㅋ, ㄷ/ㅌ and ㅂ/ㅍ, so a coda
-//!   `k`/`t`/`p` always composes as ㄱ/ㄷ/ㅂ.
-//! * `isseoyo` is equally 있어요 and 이써요; we take the second reading.
-//! * Romanization transcribes pronunciation, so consonants that assimilate are
-//!   not written as the letter they come from. The common `-mnida` case is
-//!   handled in [`coda_candidates`]; others (`hangnyeon` for 학년) are not.
-//!
-//! Use `/input raw` with an OS IME when a word needs to dodge either one.
+//! A vowel with no consonant waiting takes the silent onset ㅇ, since that is
+//! how a vowel-initial syllable is written anyway (ㅏ alone is not a word).
 
-/// Choseong (onset) index for each spelling, longest spellings first.
-/// ㅇ is the silent onset and is supplied as a fallback rather than matched.
-const ONSETS: &[(&str, usize)] = &[
-    ("kk", 1),
-    ("gg", 1),
-    ("tt", 4),
-    ("dd", 4),
-    ("pp", 8),
-    ("bb", 8),
-    ("ss", 10),
-    ("jj", 13),
-    ("ch", 14),
-    ("g", 0),
-    ("n", 2),
-    ("d", 3),
-    ("r", 5),
-    ("l", 5),
-    ("m", 6),
-    ("b", 7),
-    ("s", 9),
-    ("j", 12),
-    ("k", 15),
-    ("t", 16),
-    ("p", 17),
-    ("h", 18),
+/// Compatibility jamo for each choseong (onset) index.
+#[rustfmt::skip]
+const CHOSEONG: [char; 19] = [
+    'ㄱ', 'ㄲ', 'ㄴ', 'ㄷ', 'ㄸ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅃ', 'ㅅ',
+    'ㅆ', 'ㅇ', 'ㅈ', 'ㅉ', 'ㅊ', 'ㅋ', 'ㅌ', 'ㅍ', 'ㅎ',
 ];
 
 /// The silent onset ㅇ, used when a syllable starts with its vowel.
 const SILENT_ONSET: usize = 11;
 
-/// Jungseong (nucleus) index for each spelling, longest spellings first so
-/// `yeo` wins over `ye`, `eo` over `e`, and so on.
-const VOWELS: &[(&str, usize)] = &[
-    ("wae", 10),
-    ("yae", 3),
-    ("yeo", 6),
-    ("eui", 19),
-    ("ae", 1),
-    ("eo", 4),
-    ("eu", 18),
-    ("oe", 11),
-    ("ui", 19),
-    ("wa", 9),
-    ("we", 15),
-    ("wi", 16),
-    ("wo", 14),
-    ("ya", 2),
-    ("ye", 7),
-    ("yo", 12),
-    ("yu", 17),
-    ("a", 0),
-    ("e", 5),
-    ("i", 20),
-    ("o", 8),
-    ("u", 13),
+/// Compatibility jamo for each jungseong (vowel) index.
+#[rustfmt::skip]
+const JUNGSEONG: [char; 21] = [
+    'ㅏ', 'ㅐ', 'ㅑ', 'ㅒ', 'ㅓ', 'ㅔ', 'ㅕ', 'ㅖ', 'ㅗ', 'ㅘ',
+    'ㅙ', 'ㅚ', 'ㅛ', 'ㅜ', 'ㅝ', 'ㅞ', 'ㅟ', 'ㅠ', 'ㅡ', 'ㅢ', 'ㅣ',
 ];
 
-/// Jongseong (coda) index for each spelling, **shortest spellings first**.
-/// The parser tries these in order, so a lone consonant is preferred as the
-/// next syllable's onset before it is absorbed into a cluster coda.
-const CODAS: &[(&str, usize)] = &[
-    ("g", 1),
-    ("k", 1),
-    ("n", 4),
-    ("d", 7),
-    ("t", 7),
-    ("l", 8),
-    ("r", 8),
-    ("m", 16),
-    ("b", 17),
-    ("p", 17),
-    ("s", 19),
-    ("j", 22),
-    ("h", 27),
-    ("kk", 2),
-    ("gg", 2),
-    ("gs", 3),
-    ("ks", 3),
-    ("nj", 5),
-    ("nh", 6),
-    ("lg", 9),
-    ("lk", 9),
-    ("lm", 10),
-    ("lb", 11),
-    ("ls", 12),
-    ("lt", 13),
-    ("lp", 14),
-    ("lh", 15),
-    ("bs", 18),
-    ("ps", 18),
-    ("ss", 20),
-    ("ng", 21),
-    ("ch", 23),
+/// Compatibility jamo for each jongseong (coda) index. Index 0 is "no coda"
+/// and has no jamo of its own, so this table starts at index 1.
+#[rustfmt::skip]
+const JONGSEONG: [char; 27] = [
+    'ㄱ', 'ㄲ', 'ㄳ', 'ㄴ', 'ㄵ', 'ㄶ', 'ㄷ', 'ㄹ', 'ㄺ', 'ㄻ',
+    'ㄼ', 'ㄽ', 'ㄾ', 'ㄿ', 'ㅀ', 'ㅁ', 'ㅂ', 'ㅄ', 'ㅅ', 'ㅆ',
+    'ㅇ', 'ㅈ', 'ㅊ', 'ㅋ', 'ㅌ', 'ㅍ', 'ㅎ',
 ];
 
-/// Convert romanized Korean to Hangul, leaving anything that does not parse
-/// exactly as it was typed.
-pub fn from_roman(text: &str) -> String {
-    let mut out = String::new();
+/// The two-consonant codas, as (first, second, combined). A cluster is built by
+/// picking its two consonants in a row, and split back apart when a vowel
+/// claims the second one (앉 + ㅏ -> 안자).
+#[rustfmt::skip]
+const CLUSTERS: [(char, char, char); 11] = [
+    ('ㄱ', 'ㅅ', 'ㄳ'),
+    ('ㄴ', 'ㅈ', 'ㄵ'),
+    ('ㄴ', 'ㅎ', 'ㄶ'),
+    ('ㄹ', 'ㄱ', 'ㄺ'),
+    ('ㄹ', 'ㅁ', 'ㄻ'),
+    ('ㄹ', 'ㅂ', 'ㄼ'),
+    ('ㄹ', 'ㅅ', 'ㄽ'),
+    ('ㄹ', 'ㅌ', 'ㄾ'),
+    ('ㄹ', 'ㅍ', 'ㄿ'),
+    ('ㄹ', 'ㅎ', 'ㅀ'),
+    ('ㅂ', 'ㅅ', 'ㅄ'),
+];
 
-    // A hyphen is Revised Romanization's explicit syllable divider ("jung-ang"),
-    // so it joins letters into one word here and is dropped once the word
-    // converts. Grouping it with the letters also keeps a standalone dash --
-    // which never parses -- passing through untouched.
-    for (is_word, run) in hyphenated_runs(text) {
-        if is_word {
-            out.push_str(&convert_word(&run));
-        } else {
-            out.push_str(&run);
-        }
-    }
+const SYLLABLE_BASE: u32 = 0xAC00;
+const SYLLABLE_LAST: u32 = 0xD7A3;
 
-    out
-}
-
-fn hyphenated_runs(text: &str) -> Vec<(bool, String)> {
-    let mut runs: Vec<(bool, String)> = Vec::new();
-
-    for ch in text.chars() {
-        let is_word = ch.is_ascii_alphabetic() || ch == '-';
-        match runs.last_mut() {
-            Some((kind, buf)) if *kind == is_word => buf.push(ch),
-            _ => runs.push((is_word, ch.to_string())),
-        }
-    }
-
-    runs
-}
-
-fn convert_word(word: &str) -> String {
-    let lowered = word.to_ascii_lowercase();
-    let mut composed = String::new();
-
-    for segment in lowered.split('-') {
-        if segment.is_empty() {
-            return word.to_string();
-        }
-        let chars: Vec<char> = segment.chars().collect();
-        match parse(&chars) {
-            Some(hangul) => composed.push_str(&hangul),
-            // English words, names and typos stay legible instead of turning
-            // into nonsense syllables.
-            None => return word.to_string(),
-        }
-    }
-
-    composed
-}
-
-fn parse(chars: &[char]) -> Option<String> {
-    let mut out = String::new();
-    let mut failed = vec![false; chars.len() + 1];
-
-    if walk(chars, 0, &mut out, &mut failed) {
-        Some(out)
-    } else {
-        None
+/// Add `jamo` to the end of `buf`, merging it into the syllable in progress
+/// where Korean orthography says it belongs.
+///
+/// Only ever touches the last character, so the caller can use it for any
+/// insertion at the end of a line and fall back to a plain insert elsewhere.
+pub fn push(buf: &mut Vec<char>, jamo: char) {
+    match (choseong_index(jamo), jungseong_index(jamo)) {
+        (_, Some(vowel)) => push_vowel(buf, vowel),
+        (Some(_), None) => push_consonant(buf, jamo),
+        // Not something the palette offers (a cluster coda pasted in, say);
+        // nothing sensible to merge it with.
+        (None, None) => buf.push(jamo),
     }
 }
 
-fn walk(chars: &[char], pos: usize, out: &mut String, failed: &mut [bool]) -> bool {
-    if pos == chars.len() {
-        return true;
+fn push_consonant(buf: &mut Vec<char>, jamo: char) {
+    if let Some((onset, vowel, coda)) = buf.last().copied().and_then(decompose) {
+        // An open syllable takes the consonant as its coda...
+        if coda == 0 {
+            if let Some(index) = jongseong_index(jamo) {
+                replace_last(buf, compose(onset, vowel, index));
+                return;
+            }
+        // ...and one that already has a coda can still grow it to a cluster.
+        } else if let Some(index) = combine(JONGSEONG[coda - 1], jamo).and_then(jongseong_index) {
+            replace_last(buf, compose(onset, vowel, index));
+            return;
+        }
     }
-    // Whether the remainder parses depends only on where it starts, so one
-    // failure at a position rules it out for every path that reaches it.
-    if failed[pos] {
-        return false;
-    }
 
-    for (onset_len, onset) in onset_candidates(chars, pos) {
-        let after_onset = pos + onset_len;
+    // Nothing to attach to. It stands alone until a vowel makes it an onset.
+    buf.push(jamo);
+}
 
-        for (vowel_len, vowel) in matches_at(chars, after_onset, VOWELS) {
-            let after_vowel = after_onset + vowel_len;
+fn push_vowel(buf: &mut Vec<char>, vowel: usize) {
+    if let Some(last) = buf.last().copied() {
+        // A consonant left standing was waiting for exactly this.
+        if let Some(onset) = choseong_index(last) {
+            replace_last(buf, compose(onset, vowel, 0));
+            return;
+        }
 
-            for (coda_len, coda) in coda_candidates(chars, after_vowel) {
-                let mark = out.len();
-                out.push(compose(onset, vowel, coda));
+        // A coda belongs to this vowel, not to the syllable it is sitting on,
+        // so hand it over -- keeping the first half of a cluster behind.
+        if let Some((prev_onset, prev_vowel, coda)) = decompose(last) {
+            if coda > 0 {
+                let (kept, moved) = match split(JONGSEONG[coda - 1]) {
+                    Some((first, second)) => (jongseong_index(first).unwrap_or(0), second),
+                    None => (0, JONGSEONG[coda - 1]),
+                };
 
-                if walk(chars, after_vowel + coda_len, out, failed) {
-                    return true;
+                if let Some(onset) = choseong_index(moved) {
+                    replace_last(buf, compose(prev_onset, prev_vowel, kept));
+                    buf.push(compose(onset, vowel, 0));
+                    return;
                 }
-
-                out.truncate(mark);
             }
         }
     }
 
-    failed[pos] = true;
-    false
+    buf.push(compose(SILENT_ONSET, vowel, 0));
 }
 
-fn onset_candidates(chars: &[char], pos: usize) -> Vec<(usize, usize)> {
-    let mut candidates = matches_at(chars, pos, ONSETS);
-    // Consuming the consonant is more often right than treating it as the start
-    // of a vowel-initial syllable, so the silent onset goes last.
-    candidates.push((0, SILENT_ONSET));
-    candidates
+/// Remove one *jamo* from the end of `buf` rather than one character, so a
+/// mis-picked coda can be taken back without losing the whole syllable
+/// (감 -> 가 -> ㄱ). Returns false when the last character is not a syllable
+/// and the caller should just delete it.
+pub fn backspace(buf: &mut Vec<char>) -> bool {
+    let Some((onset, vowel, coda)) = buf.last().copied().and_then(decompose) else {
+        return false;
+    };
+
+    let stripped = match coda {
+        // No coda left to take: the vowel goes, leaving the bare onset.
+        0 => CHOSEONG[onset],
+        // A cluster only loses its second half.
+        _ => match split(JONGSEONG[coda - 1]) {
+            Some((first, _)) => compose(onset, vowel, jongseong_index(first).unwrap_or(0)),
+            None => compose(onset, vowel, 0),
+        },
+    };
+
+    replace_last(buf, stripped);
+    true
 }
 
-fn coda_candidates(chars: &[char], pos: usize) -> Vec<(usize, usize)> {
-    // Index 0 is "no coda", tried first: `haseyo` is 하세요, not 핫에요.
-    let mut candidates = vec![(0usize, 0usize)];
-
-    // Romanization writes pronunciation, and a final ㅂ before ㄴ assimilates to
-    // [m] -- which is why the very common formal ending -ㅂ니다 is romanized
-    // "-mnida". Offering ㅂ ahead of ㅁ there gets `gamsahamnida` to 감사합니다
-    // instead of 감사함니다. ㅁ is still offered below, so the rarer words that
-    // genuinely have it still parse.
-    if chars.get(pos) == Some(&'m') && chars.get(pos + 1) == Some(&'n') {
-        candidates.push((1, 17));
-    }
-
-    candidates.extend(matches_at(chars, pos, CODAS));
-    candidates
-}
-
-fn matches_at(chars: &[char], pos: usize, table: &[(&str, usize)]) -> Vec<(usize, usize)> {
-    table
-        .iter()
-        .filter_map(|(spelling, index)| {
-            // Every spelling is ASCII, so byte length is character length.
-            let len = spelling.len();
-            if pos + len <= chars.len()
-                && chars[pos..pos + len].iter().copied().eq(spelling.chars())
-            {
-                Some((len, *index))
-            } else {
-                None
-            }
-        })
-        .collect()
+fn replace_last(buf: &mut Vec<char>, ch: char) {
+    buf.pop();
+    buf.push(ch);
 }
 
 fn compose(onset: usize, vowel: usize, coda: usize) -> char {
-    let code = 0xAC00 + ((onset * 21 + vowel) * 28 + coda) as u32;
+    let code = SYLLABLE_BASE + ((onset * 21 + vowel) * 28 + coda) as u32;
     // Indices come from the tables above and are in range by construction.
     char::from_u32(code).expect("hangul syllable index out of range")
+}
+
+/// Split a precomposed syllable back into (onset, vowel, coda) indices.
+fn decompose(ch: char) -> Option<(usize, usize, usize)> {
+    let code = ch as u32;
+    if !(SYLLABLE_BASE..=SYLLABLE_LAST).contains(&code) {
+        return None;
+    }
+
+    let offset = (code - SYLLABLE_BASE) as usize;
+    Some((offset / (21 * 28), (offset / 28) % 21, offset % 28))
+}
+
+fn choseong_index(ch: char) -> Option<usize> {
+    CHOSEONG.iter().position(|&c| c == ch)
+}
+
+fn jungseong_index(ch: char) -> Option<usize> {
+    JUNGSEONG.iter().position(|&c| c == ch)
+}
+
+/// Coda index for `ch`, one higher than its table position because index 0 is
+/// reserved for "no coda".
+fn jongseong_index(ch: char) -> Option<usize> {
+    JONGSEONG.iter().position(|&c| c == ch).map(|i| i + 1)
+}
+
+fn combine(first: char, second: char) -> Option<char> {
+    CLUSTERS
+        .iter()
+        .find(|(a, b, _)| *a == first && *b == second)
+        .map(|(_, _, cluster)| *cluster)
+}
+
+fn split(cluster: char) -> Option<(char, char)> {
+    CLUSTERS
+        .iter()
+        .find(|(_, _, c)| *c == cluster)
+        .map(|(first, second, _)| (*first, *second))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Pick each jamo in turn, as the palette would.
+    fn typed(jamo: &str) -> String {
+        let mut buf = Vec::new();
+        for ch in jamo.chars() {
+            push(&mut buf, ch);
+        }
+        buf.into_iter().collect()
+    }
+
     #[test]
     fn composes_syllables_arithmetically() {
         assert_eq!(compose(18, 0, 4), '한');
         assert_eq!(compose(0, 18, 8), '글');
-        assert_eq!(compose(0, 0, 16), '감');
+        assert_eq!(decompose('한'), Some((18, 0, 4)));
+        assert_eq!(decompose('a'), None);
     }
 
     #[test]
-    fn resolves_coda_versus_next_onset() {
-        // `n` must become a coda here...
-        assert_eq!(from_roman("hangeul"), "한글");
-        // ...but `s` must not there.
-        assert_eq!(from_roman("haseyo"), "하세요");
-        // Requires backtracking past the shorter `n` coda to reach `ng`.
-        assert_eq!(from_roman("annyeong"), "안녕");
+    fn builds_a_syllable_slot_by_slot() {
+        assert_eq!(typed("ㄱ"), "ㄱ");
+        assert_eq!(typed("ㄱㅏ"), "가");
+        assert_eq!(typed("ㄱㅏㅁ"), "감");
     }
 
     #[test]
-    fn converts_common_phrases() {
-        assert_eq!(from_roman("annyeonghaseyo"), "안녕하세요");
-        assert_eq!(from_roman("gamsahamnida"), "감사합니다");
-        assert_eq!(from_roman("seoul"), "서울");
-        assert_eq!(from_roman("hanguk"), "한국");
+    fn a_vowel_takes_the_previous_coda_as_its_onset() {
+        // The coda has to move, or 가마 is untypeable.
+        assert_eq!(typed("ㄱㅏㅁㅏ"), "가마");
+        assert_eq!(typed("ㅎㅏㄴㄱㅜㄱ"), "한국");
+        assert_eq!(typed("ㅇㅏㄴㄴㅕㅇ"), "안녕");
     }
 
     #[test]
-    fn keeps_punctuation_spacing_and_case() {
-        assert_eq!(from_roman("annyeong, seoul!"), "안녕, 서울!");
-        assert_eq!(from_roman("Seoul"), "서울");
+    fn cluster_codas_form_and_come_apart_again() {
+        assert_eq!(typed("ㅇㅏㄴㅈ"), "앉");
+        // Only the second consonant moves to the new syllable.
+        assert_eq!(typed("ㅇㅏㄴㅈㅏ"), "안자");
+        assert_eq!(typed("ㅇㅣㄹㄱ"), "읽");
     }
 
     #[test]
-    fn hyphen_divides_syllables_and_is_dropped() {
-        assert_eq!(from_roman("jung-ang"), "중앙");
-        // A dash that is not a syllable divider survives.
-        assert_eq!(from_roman("seoul - hanguk"), "서울 - 한국");
+    fn a_vowel_with_nothing_waiting_gets_the_silent_onset() {
+        assert_eq!(typed("ㅏ"), "아");
+        // 가 is closed, so the next vowel starts its own syllable.
+        assert_eq!(typed("ㄱㅏㅏ"), "가아");
+        assert_eq!(typed("ㅇㅏㄴㄴㅕㅇㅎㅏㅅㅔㅇㅛ"), "안녕하세요");
     }
 
     #[test]
-    fn leaves_unparseable_words_alone() {
-        assert_eq!(from_roman("xyz"), "xyz");
-        assert_eq!(from_roman("wifi"), "wifi");
-        // Anything that *is* a valid romanization does convert, so this mode is
-        // only for lines meant as Korean -- `/input raw` is the escape hatch.
-        assert_eq!(from_roman("hello"), "헬로");
+    fn backspace_removes_one_jamo_at_a_time() {
+        let mut buf: Vec<char> = "감".chars().collect();
+        assert!(backspace(&mut buf));
+        assert_eq!(buf, vec!['가']);
+        assert!(backspace(&mut buf));
+        assert_eq!(buf, vec!['ㄱ']);
+        // A bare jamo is one character already; the caller deletes it.
+        assert!(!backspace(&mut buf));
+    }
+
+    #[test]
+    fn backspace_takes_a_cluster_apart_before_the_syllable() {
+        let mut buf: Vec<char> = "앉".chars().collect();
+        assert!(backspace(&mut buf));
+        assert_eq!(buf, vec!['안']);
+    }
+
+    #[test]
+    fn non_hangul_is_left_alone() {
+        let mut buf: Vec<char> = "ok".chars().collect();
+        assert!(!backspace(&mut buf));
+        assert_eq!(buf, vec!['o', 'k']);
+
+        // A consonant after a non-syllable just lands next to it.
+        assert_eq!(typed("ㄱ"), "ㄱ");
     }
 }

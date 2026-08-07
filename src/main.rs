@@ -11,16 +11,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use input::{InputMode, Script};
+use input::{
+    editor::{self, Editor, Line},
+    Script,
+};
 use model::Translator;
 use pairs::PairSpec;
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "translate",
-    version,
-    about = "Small offline translator (English -> Spanish, Korean -> English, Russian -> English)"
-)]
+#[command(name = "translate", version, about = "Small offline translator")]
 struct Args {
     /// Directory holding one subdirectory per language pair.
     /// Defaults to a "model" folder beside translate.exe.
@@ -46,7 +45,6 @@ struct Session {
     max_tokens: usize,
     /// Which pair plain-ASCII lines are translated with.
     active: &'static PairSpec,
-    input_mode: InputMode,
     /// Loaded lazily so startup only pays for the pairs actually used.
     loaded: HashMap<&'static str, Translator>,
 }
@@ -57,7 +55,6 @@ impl Session {
             model_dir,
             max_tokens,
             active,
-            input_mode: default_input_mode(active),
             loaded: HashMap::new(),
         }
     }
@@ -76,37 +73,17 @@ impl Session {
             .expect("translator inserted above"))
     }
 
-    /// Decide which model handles `line`, and what text to hand it.
+    /// Decide which model handles `line`.
     ///
-    /// A line that already contains Hangul or Cyrillic -- pasted, or typed with
-    /// an OS IME -- routes itself. A plain ASCII line belongs to the active
-    /// pair, and is transliterated first when that pair reads a non-Latin
-    /// script and romanized input is on.
-    fn route(&self, line: &str) -> (&'static PairSpec, String) {
+    /// A line that contains Hangul or Cyrillic -- picked from the palette,
+    /// pasted, or typed with an OS IME -- routes itself. A plain ASCII line
+    /// belongs to the active pair.
+    fn route(&self, line: &str) -> &'static PairSpec {
         match input::detect(line) {
-            Script::Latin => {
-                let text = if self.input_mode == InputMode::Roman {
-                    input::romanize(self.active.script, line)
-                } else {
-                    line.to_string()
-                };
-                (self.active, text)
-            }
-            script => match pairs::for_script(script) {
-                Some(pair) => (pair, line.to_string()),
-                // No model for that script; let the active pair try.
-                None => (self.active, line.to_string()),
-            },
+            Script::Latin => self.active,
+            // No model for that script; let the active pair try.
+            script => pairs::for_script(script).unwrap_or(self.active),
         }
-    }
-}
-
-/// Romanized input is the default for pairs that read a non-Latin script, since
-/// that is the whole point of it; Latin-input pairs have nothing to convert.
-fn default_input_mode(pair: &PairSpec) -> InputMode {
-    match pair.script {
-        Script::Latin => InputMode::Raw,
-        _ => InputMode::Roman,
     }
 }
 
@@ -125,22 +102,19 @@ fn resolve_pair(id: &str) -> Result<&'static PairSpec> {
 
 fn print_banner(session: &Session) {
     println!();
-    println!("Offline Translator");
-    println!(
-        "{}  [input: {}]",
-        session.active.label,
-        session.input_mode.name()
-    );
+    println!("lg-translator");
+    println!("{}", session.active.label);
+    if editor::palette_available(session.active.script) {
+        println!("Press Up or Down to browse the alphabet and pick letters.");
+    }
     println!("Enter one line at a time. Press Ctrl-C to exit.");
-    println!("Commands: /lang  /input  /help  /clear  /quit");
+    println!("Commands: /lang  /help  /clear  /quit");
     println!();
 }
 
 fn print_help(session: &Session) {
     println!("Type a line and press Enter to translate it.");
     println!();
-    println!("Lines containing Hangul or Cyrillic are routed to the matching model");
-    println!("automatically, so pasted text and OS input methods just work.");
     println!("Plain ASCII lines go to the active pair.");
     println!();
 
@@ -161,35 +135,30 @@ fn print_help(session: &Session) {
     println!();
 
     println!("/lang <pair>    switch the active pair");
-    println!("/input roman    type Korean or Russian in ASCII (default for those pairs)");
-    println!("/input raw      pass typed text through untouched");
     println!("/clear          clear the terminal");
     println!("/quit           exit");
     println!("Ctrl-C          exit immediately");
     println!();
 
-    if session.input_mode == InputMode::Roman {
-        match session.active.script {
-            Script::Hangul => {
-                println!("Romanized Korean uses Revised Romanization:");
-                println!("  annyeonghaseyo -> 안녕하세요     gamsahamnida -> 감사합니다");
-                println!(
-                    "  g/k, d/t, b/p are ㄱ/ㅋ, ㄷ/ㅌ, ㅂ/ㅍ; a hyphen forces a syllable break."
-                );
-                println!("  Words that are not valid romanization are left as typed.");
+    match session.active.script {
+        script if editor::palette_available(script) => {
+            println!("Picking letters:");
+            println!("  Up or Down     open the alphabet under the prompt");
+            println!("  arrow keys     move the highlight around it");
+            println!("  Enter          insert the highlighted letter");
+            println!("  Esc            close it, giving Enter back to the prompt");
+            println!("  typing         also closes it, so commands still work");
+            println!();
+
+            if script == Script::Hangul {
+                println!("Korean is picked one jamo at a time and composed as you go:");
+                println!("  ㅎ ㅏ ㄴ -> 한       a consonant after a vowel becomes the coda");
+                println!("  ㄱ ㅏ ㅁ ㅏ -> 가마   the next vowel takes that coda back");
+                println!("  Backspace removes one jamo, not the whole syllable.");
                 println!();
             }
-            Script::Cyrillic => {
-                println!("Transliterated Russian:");
-                println!("  privet -> привет     shchi -> щи     chay -> чай");
-                println!("  zh ж, kh х, ts ц, ch ч, sh ш, shch щ, yu ю, ya я, yo ё");
-                println!("  y is ы after a consonant and й after a vowel; j is й.");
-                println!("  Quote keys reach the rest: e' -> э, ' -> ь, \" -> ъ");
-                println!("    e'to -> это    chitat' -> читать    pod\"ezd -> подъезд");
-                println!();
-            }
-            Script::Latin => {}
         }
+        _ => {}
     }
 }
 
@@ -205,12 +174,7 @@ fn set_lang(session: &mut Session, arg: &str) {
     match pairs::find(arg) {
         Some(pair) => {
             session.active = pair;
-            session.input_mode = default_input_mode(pair);
-            println!(
-                "Active pair: {}  [input: {}]\n",
-                pair.label,
-                session.input_mode.name()
-            );
+            println!("Active pair: {}\n", pair.label);
         }
         None => {
             let known: Vec<&str> = pairs::all().iter().map(|p| p.id).collect();
@@ -219,27 +183,11 @@ fn set_lang(session: &mut Session, arg: &str) {
     }
 }
 
-fn set_input_mode(session: &mut Session, arg: &str) {
-    match InputMode::parse(arg) {
-        Some(mode) => {
-            session.input_mode = mode;
-            println!("Input mode: {}\n", mode.name());
-        }
-        None => eprintln!("unknown input mode {arg:?} (known: raw, roman)\n"),
-    }
-}
-
 fn handle_line(session: &mut Session, line: &str) {
-    let (pair, text) = session.route(line);
-
-    // Show what romanization produced, so a misparse is obvious rather than
-    // silently mistranslated.
-    if text != line {
-        println!("  {text}");
-    }
+    let pair = session.route(line);
 
     match session.translator_for(pair) {
-        Ok(translator) => match translator.translate(&text) {
+        Ok(translator) => match translator.translate(line) {
             Ok(translated) => println!("{translated}\n"),
             Err(err) => eprintln!("translation error: {err:#}\n"),
         },
@@ -250,22 +198,21 @@ fn handle_line(session: &mut Session, line: &str) {
 fn repl(mut session: Session) -> Result<()> {
     print_banner(&session);
 
-    let stdin = io::stdin();
+    let mut editor = Editor::new();
 
     loop {
-        print!("> ");
-        io::stdout().flush()?;
+        // The palette follows the active pair, since that is the script the
+        // next plain line will be read as.
+        let line = match editor.read_line("> ", session.active.script)? {
+            Line::Text(line) => line,
+            // EOF also exits cleanly (e.g. Ctrl-Z then Enter on Windows).
+            Line::Eof | Line::Interrupted => {
+                println!();
+                break;
+            }
+        };
 
-        let mut input = String::new();
-        let bytes = stdin.read_line(&mut input)?;
-
-        // EOF also exits cleanly (e.g. Ctrl-Z then Enter on Windows).
-        if bytes == 0 {
-            println!();
-            break;
-        }
-
-        let input = input.trim();
+        let input = line.trim();
         if input.is_empty() {
             continue;
         }
@@ -284,8 +231,6 @@ fn repl(mut session: Session) -> Result<()> {
             }
             "/lang" if !arg.is_empty() => set_lang(&mut session, arg),
             "/lang" => println!("usage: /lang <pair>   (see /help)\n"),
-            "/input" if !arg.is_empty() => set_input_mode(&mut session, arg),
-            "/input" => println!("usage: /input raw|roman\n"),
             _ => handle_line(&mut session, input),
         }
     }
