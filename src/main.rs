@@ -99,6 +99,13 @@ impl Translator {
     }
 
     fn translate(&mut self, text: &str) -> Result<String> {
+        // The model keeps self- and cross-attention KV caches across forward passes.
+        // They belong to the previous line, so they must be cleared before starting a
+        // new one; otherwise the decoder attends to the old sentence and immediately
+        // emits "." followed by EOS. Resetting here (rather than after generating)
+        // also recovers cleanly if a previous translation errored partway through.
+        self.model.reset_kv_cache();
+
         let mut source_ids = self
             .source_tokenizer
             .encode(text, true)
