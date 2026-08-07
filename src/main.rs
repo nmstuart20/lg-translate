@@ -1,227 +1,196 @@
-use anyhow::{bail, Context, Error as E, Result};
-use candle_core::{DType, Device, Tensor};
-use candle_nn::VarBuilder;
-use candle_transformers::generation::LogitsProcessor;
-use candle_transformers::models::marian;
+mod download;
+mod input;
+mod model;
+mod pairs;
+
+use anyhow::{bail, Context, Result};
 use clap::Parser;
-use hf_hub::{api::sync::Api, Repo, RepoType};
 use std::{
-    fs,
+    collections::HashMap,
     io::{self, Write},
     path::{Path, PathBuf},
 };
-use tokenizers::Tokenizer;
 
-const MODEL_REPO: &str = "Helsinki-NLP/opus-mt-en-es";
-const MODEL_REVISION: &str = "refs/pr/4";
-const TOKENIZER_REPO: &str = "KeighBee/candle-marian";
-
-const MODEL_FILE: &str = "model.safetensors";
-const SOURCE_TOKENIZER_FILE: &str = "tokenizer-marian-base-en-es-en.json";
-const TARGET_TOKENIZER_FILE: &str = "tokenizer-marian-base-en-es-es.json";
+use input::{InputMode, Script};
+use model::Translator;
+use pairs::PairSpec;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "translate",
     version,
-    about = "Small offline English -> Spanish translator"
+    about = "Small offline translator (English -> Spanish, Korean -> English, Russian -> English)"
 )]
 struct Args {
-    /// Directory containing model.safetensors and tokenizer JSON files.
+    /// Directory holding one subdirectory per language pair.
     /// Defaults to a "model" folder beside translate.exe.
     #[arg(long)]
     model_dir: Option<PathBuf>,
 
-    /// Download/update the required model files and exit.
-    #[arg(long)]
-    download_model: bool,
+    /// Download the given pair ("en-es", "ko-en", "ru-en") and exit.
+    /// Pass "all" or omit the value for every pair.
+    #[arg(long, value_name = "PAIR", num_args = 0..=1, default_missing_value = "all")]
+    download_model: Option<String>,
+
+    /// Language pair to start in.
+    #[arg(long, value_name = "PAIR")]
+    lang: Option<String>,
 
     /// Maximum number of generated tokens per input line.
     #[arg(long, default_value_t = 256)]
     max_tokens: usize,
 }
 
-struct Translator {
-    model: marian::MTModel,
-    source_tokenizer: Tokenizer,
-    target_tokenizer: Tokenizer,
-    config: marian::Config,
-    device: Device,
+struct Session {
+    model_dir: PathBuf,
     max_tokens: usize,
+    /// Which pair plain-ASCII lines are translated with.
+    active: &'static PairSpec,
+    input_mode: InputMode,
+    /// Loaded lazily so startup only pays for the pairs actually used.
+    loaded: HashMap<&'static str, Translator>,
 }
 
-impl Translator {
-    fn load(model_dir: &Path, max_tokens: usize) -> Result<Self> {
-        let model_path = model_dir.join(MODEL_FILE);
-        let src_tok_path = model_dir.join(SOURCE_TOKENIZER_FILE);
-        let dst_tok_path = model_dir.join(TARGET_TOKENIZER_FILE);
-
-        for path in [&model_path, &src_tok_path, &dst_tok_path] {
-            if !path.exists() {
-                bail!(
-                    "Required file is missing: {}\nRun `translate.exe --download-model` first.",
-                    path.display()
-                );
-            }
-        }
-
-        println!("Loading translation model...");
-        let device = Device::Cpu;
-        let config = marian::Config::opus_mt_en_es();
-
-        let source_tokenizer =
-            Tokenizer::from_file(&src_tok_path).map_err(E::msg).with_context(|| {
-                format!("failed to load {}", src_tok_path.display())
-            })?;
-        let target_tokenizer =
-            Tokenizer::from_file(&dst_tok_path).map_err(E::msg).with_context(|| {
-                format!("failed to load {}", dst_tok_path.display())
-            })?;
-
-        // SAFETY:
-        // Candle memory-maps the safetensors file. The file is only read, not modified,
-        // and remains present on disk for the lifetime of the model.
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[&model_path], DType::F32, &device)
-                .with_context(|| format!("failed to load {}", model_path.display()))?
-        };
-
-        let model = marian::MTModel::new(&config, vb)?;
-
-        Ok(Self {
-            model,
-            source_tokenizer,
-            target_tokenizer,
-            config,
-            device,
+impl Session {
+    fn new(model_dir: PathBuf, max_tokens: usize, active: &'static PairSpec) -> Self {
+        Self {
+            model_dir,
             max_tokens,
-        })
+            active,
+            input_mode: default_input_mode(active),
+            loaded: HashMap::new(),
+        }
     }
 
-    fn translate(&mut self, text: &str) -> Result<String> {
-        // The model keeps self- and cross-attention KV caches across forward passes.
-        // They belong to the previous line, so they must be cleared before starting a
-        // new one; otherwise the decoder attends to the old sentence and immediately
-        // emits "." followed by EOS. Resetting here (rather than after generating)
-        // also recovers cleanly if a previous translation errored partway through.
-        self.model.reset_kv_cache();
-
-        let mut source_ids = self
-            .source_tokenizer
-            .encode(text, true)
-            .map_err(E::msg)?
-            .get_ids()
-            .to_vec();
-
-        source_ids.push(self.config.eos_token_id);
-
-        let source = Tensor::new(source_ids.as_slice(), &self.device)?.unsqueeze(0)?;
-        let encoder_output = self.model.encoder().forward(&source, 0)?;
-
-        let mut token_ids = vec![self.config.decoder_start_token_id];
-
-        // Greedy decoding. For a utility translator this is deterministic and cheap.
-        let mut logits_processor = LogitsProcessor::new(0, None, None);
-
-        for index in 0..self.max_tokens {
-            let context_size = if index >= 1 { 1 } else { token_ids.len() };
-            let start_pos = token_ids.len().saturating_sub(context_size);
-
-            let decoder_input =
-                Tensor::new(&token_ids[start_pos..], &self.device)?.unsqueeze(0)?;
-
-            let logits = self
-                .model
-                .decode(&decoder_input, &encoder_output, start_pos)?
-                .squeeze(0)?;
-
-            let logits = logits.get(logits.dim(0)? - 1)?;
-            let token = logits_processor.sample(&logits)?;
-            token_ids.push(token);
-
-            if token == self.config.eos_token_id
-                || token == self.config.forced_eos_token_id
-            {
-                break;
-            }
+    fn translator_for(&mut self, pair: &'static PairSpec) -> Result<&mut Translator> {
+        if !self.loaded.contains_key(pair.id) {
+            println!("Loading {} model...", pair.label);
+            let pair_dir = self.model_dir.join(pair.id);
+            let translator = Translator::load(pair, &pair_dir, self.max_tokens)?;
+            self.loaded.insert(pair.id, translator);
         }
 
-        // Remove decoder start/end control tokens before turning IDs back into text.
-        let output_ids: Vec<u32> = token_ids
-            .into_iter()
-            .filter(|id| {
-                *id != self.config.decoder_start_token_id
-                    && *id != self.config.eos_token_id
-                    && *id != self.config.forced_eos_token_id
-            })
-            .collect();
+        Ok(self
+            .loaded
+            .get_mut(pair.id)
+            .expect("translator inserted above"))
+    }
 
-        self.target_tokenizer
-            .decode(&output_ids, true)
-            .map_err(E::msg)
+    /// Decide which model handles `line`, and what text to hand it.
+    ///
+    /// A line that already contains Hangul or Cyrillic -- pasted, or typed with
+    /// an OS IME -- routes itself. A plain ASCII line belongs to the active
+    /// pair, and is transliterated first when that pair reads a non-Latin
+    /// script and romanized input is on.
+    fn route(&self, line: &str) -> (&'static PairSpec, String) {
+        match input::detect(line) {
+            Script::Latin => {
+                let text = if self.input_mode == InputMode::Roman {
+                    input::romanize(self.active.script, line)
+                } else {
+                    line.to_string()
+                };
+                (self.active, text)
+            }
+            script => match pairs::for_script(script) {
+                Some(pair) => (pair, line.to_string()),
+                // No model for that script; let the active pair try.
+                None => (self.active, line.to_string()),
+            },
+        }
+    }
+}
+
+/// Romanized input is the default for pairs that read a non-Latin script, since
+/// that is the whole point of it; Latin-input pairs have nothing to convert.
+fn default_input_mode(pair: &PairSpec) -> InputMode {
+    match pair.script {
+        Script::Latin => InputMode::Raw,
+        _ => InputMode::Roman,
     }
 }
 
 fn default_model_dir() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("could not determine executable path")?;
-    let parent = exe
-        .parent()
-        .context("executable has no parent directory")?;
+    let parent = exe.parent().context("executable has no parent directory")?;
     Ok(parent.join("model"))
 }
 
-fn download_model(model_dir: &Path) -> Result<()> {
-    fs::create_dir_all(model_dir)?;
-
-    println!("Downloading English -> Spanish model...");
-    println!("Destination: {}", model_dir.display());
-
-    let api = Api::new().context("failed to initialize Hugging Face client")?;
-
-    let model_repo = api.repo(Repo::with_revision(
-        MODEL_REPO.to_string(),
-        RepoType::Model,
-        MODEL_REVISION.to_string(),
-    ));
-    let tokenizer_repo = api.model(TOKENIZER_REPO.to_string());
-
-    let downloads = [
-        (
-            model_repo.get(MODEL_FILE)?,
-            model_dir.join(MODEL_FILE),
-        ),
-        (
-            tokenizer_repo.get(SOURCE_TOKENIZER_FILE)?,
-            model_dir.join(SOURCE_TOKENIZER_FILE),
-        ),
-        (
-            tokenizer_repo.get(TARGET_TOKENIZER_FILE)?,
-            model_dir.join(TARGET_TOKENIZER_FILE),
-        ),
-    ];
-
-    for (cached, destination) in downloads {
-        fs::copy(&cached, &destination).with_context(|| {
-            format!(
-                "failed copying {} to {}",
-                cached.display(),
-                destination.display()
-            )
-        })?;
-        println!("  {}", destination.display());
-    }
-
-    println!("\nModel download complete.");
-    Ok(())
+fn resolve_pair(id: &str) -> Result<&'static PairSpec> {
+    pairs::find(id).with_context(|| {
+        let known: Vec<&str> = pairs::all().iter().map(|p| p.id).collect();
+        format!("unknown language pair {id:?} (known: {})", known.join(", "))
+    })
 }
 
-fn print_banner() {
+fn print_banner(session: &Session) {
     println!();
     println!("Offline Translator");
-    println!("English -> Spanish");
+    println!(
+        "{}  [input: {}]",
+        session.active.label,
+        session.input_mode.name()
+    );
     println!("Enter one line at a time. Press Ctrl-C to exit.");
-    println!("Commands: /help  /clear  /quit");
+    println!("Commands: /lang  /input  /help  /clear  /quit");
     println!();
+}
+
+fn print_help(session: &Session) {
+    println!("Type a line and press Enter to translate it.");
+    println!();
+    println!("Lines containing Hangul or Cyrillic are routed to the matching model");
+    println!("automatically, so pasted text and OS input methods just work.");
+    println!("Plain ASCII lines go to the active pair.");
+    println!();
+
+    println!("Pairs:");
+    for pair in pairs::all() {
+        let marker = if pair.id == session.active.id {
+            "*"
+        } else {
+            " "
+        };
+        let state = if download::is_ready(pair, &session.model_dir) {
+            ""
+        } else {
+            "  (not downloaded)"
+        };
+        println!("  {marker} {:<6} {}{state}", pair.id, pair.label);
+    }
+    println!();
+
+    println!("/lang <pair>    switch the active pair");
+    println!("/input roman    type Korean or Russian in ASCII (default for those pairs)");
+    println!("/input raw      pass typed text through untouched");
+    println!("/clear          clear the terminal");
+    println!("/quit           exit");
+    println!("Ctrl-C          exit immediately");
+    println!();
+
+    if session.input_mode == InputMode::Roman {
+        match session.active.script {
+            Script::Hangul => {
+                println!("Romanized Korean uses Revised Romanization:");
+                println!("  annyeonghaseyo -> 안녕하세요     gamsahamnida -> 감사합니다");
+                println!(
+                    "  g/k, d/t, b/p are ㄱ/ㅋ, ㄷ/ㅌ, ㅂ/ㅍ; a hyphen forces a syllable break."
+                );
+                println!("  Words that are not valid romanization are left as typed.");
+                println!();
+            }
+            Script::Cyrillic => {
+                println!("Transliterated Russian:");
+                println!("  privet -> привет     shchi -> щи     chay -> чай");
+                println!("  zh ж, kh х, ts ц, ch ч, sh ш, shch щ, yu ю, ya я, yo ё");
+                println!("  y is ы after a consonant and й after a vowel; j is й.");
+                println!("  Quote keys reach the rest: e' -> э, ' -> ь, \" -> ъ");
+                println!("    e'to -> это    chitat' -> читать    pod\"ezd -> подъезд");
+                println!();
+            }
+            Script::Latin => {}
+        }
+    }
 }
 
 fn clear_screen() -> Result<()> {
@@ -232,8 +201,54 @@ fn clear_screen() -> Result<()> {
     Ok(())
 }
 
-fn repl(mut translator: Translator) -> Result<()> {
-    print_banner();
+fn set_lang(session: &mut Session, arg: &str) {
+    match pairs::find(arg) {
+        Some(pair) => {
+            session.active = pair;
+            session.input_mode = default_input_mode(pair);
+            println!(
+                "Active pair: {}  [input: {}]\n",
+                pair.label,
+                session.input_mode.name()
+            );
+        }
+        None => {
+            let known: Vec<&str> = pairs::all().iter().map(|p| p.id).collect();
+            eprintln!("unknown pair {arg:?} (known: {})\n", known.join(", "));
+        }
+    }
+}
+
+fn set_input_mode(session: &mut Session, arg: &str) {
+    match InputMode::parse(arg) {
+        Some(mode) => {
+            session.input_mode = mode;
+            println!("Input mode: {}\n", mode.name());
+        }
+        None => eprintln!("unknown input mode {arg:?} (known: raw, roman)\n"),
+    }
+}
+
+fn handle_line(session: &mut Session, line: &str) {
+    let (pair, text) = session.route(line);
+
+    // Show what romanization produced, so a misparse is obvious rather than
+    // silently mistranslated.
+    if text != line {
+        println!("  {text}");
+    }
+
+    match session.translator_for(pair) {
+        Ok(translator) => match translator.translate(&text) {
+            Ok(translated) => println!("{translated}\n"),
+            Err(err) => eprintln!("translation error: {err:#}\n"),
+        },
+        Err(err) => eprintln!("could not load {}: {err:#}\n", pair.label),
+    }
+}
+
+fn repl(mut session: Session) -> Result<()> {
+    print_banner(&session);
 
     let stdin = io::stdin();
 
@@ -255,40 +270,83 @@ fn repl(mut translator: Translator) -> Result<()> {
             continue;
         }
 
-        match input {
+        let (command, arg) = match input.split_once(char::is_whitespace) {
+            Some((command, rest)) => (command, rest.trim()),
+            None => (input, ""),
+        };
+
+        match command {
             "/quit" | "/exit" => break,
-            "/help" => {
-                println!("Type English text and press Enter to translate it.");
-                println!("/clear  clear the terminal");
-                println!("/quit   exit");
-                println!("Ctrl-C  exit immediately");
-                println!();
-            }
+            "/help" => print_help(&session),
             "/clear" => {
                 clear_screen()?;
-                print_banner();
+                print_banner(&session);
             }
-            _ => match translator.translate(input) {
-                Ok(translated) => println!("{translated}\n"),
-                Err(err) => eprintln!("translation error: {err:#}\n"),
-            },
+            "/lang" if !arg.is_empty() => set_lang(&mut session, arg),
+            "/lang" => println!("usage: /lang <pair>   (see /help)\n"),
+            "/input" if !arg.is_empty() => set_input_mode(&mut session, arg),
+            "/input" => println!("usage: /input raw|roman\n"),
+            _ => handle_line(&mut session, input),
         }
     }
 
     Ok(())
 }
 
+fn download_pairs(selector: &str, model_dir: &Path) -> Result<()> {
+    let selected: Vec<&'static PairSpec> = if selector == "all" {
+        pairs::all().iter().collect()
+    } else {
+        vec![resolve_pair(selector)?]
+    };
+
+    // One pair failing -- most often because the conversion step found no
+    // Python to run -- should not throw away the pairs that did work, so each
+    // is reported and the rest still run.
+    let mut failed: Vec<&'static PairSpec> = Vec::new();
+
+    for pair in &selected {
+        if let Err(err) = download::download(pair, model_dir) {
+            eprintln!("{}: {err:#}\n", pair.label);
+            failed.push(pair);
+        }
+    }
+
+    let ready: Vec<&str> = selected
+        .iter()
+        .filter(|pair| download::is_ready(pair, model_dir))
+        .map(|pair| pair.id)
+        .collect();
+
+    if !ready.is_empty() {
+        println!("Ready to use: {}", ready.join(", "));
+    }
+
+    if failed.is_empty() {
+        println!("Model download complete.");
+        return Ok(());
+    }
+
+    let names: Vec<&str> = failed.iter().map(|pair| pair.id).collect();
+    bail!("could not finish setting up: {}", names.join(", "))
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
+
     let model_dir = match args.model_dir {
         Some(path) => path,
         None => default_model_dir()?,
     };
 
-    if args.download_model {
-        return download_model(&model_dir);
+    if let Some(selector) = args.download_model {
+        return download_pairs(&selector, &model_dir);
     }
 
-    let translator = Translator::load(&model_dir, args.max_tokens)?;
-    repl(translator)
+    let active = match args.lang.as_deref() {
+        Some(id) => resolve_pair(id)?,
+        None => pairs::default_pair(),
+    };
+
+    repl(Session::new(model_dir, args.max_tokens, active))
 }

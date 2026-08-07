@@ -1,159 +1,146 @@
 # Offline Translator (Rust)
 
-A small, CPU-only English -> Spanish translation utility for Windows.
+A lightweight language translation utility.
+
+| Pair    | Direction          |
+| ------- | ------------------ |
+| `en-es` | English -> Spanish |
+| `ko-en` | Korean -> English  |
+| `ru-en` | Russian -> English |
 
 It opens as a persistent command-line REPL:
 
 ```text
 Offline Translator
-English -> Spanish
+English -> Spanish  [input: raw]
 Enter one line at a time. Press Ctrl-C to exit.
+Commands: /lang  /input  /help  /clear  /quit
 
 > Hello, how are you?
 Hola, ¿cómo estás?
 
-> I have a meeting tomorrow morning.
-Tengo una reunión mañana por la mañana.
+> Привет, как дела?
+Hey, how are you?
+
+> 한국어를 배우고 싶습니다
+I want to learn Korean.
 
 >
 ```
+
+A line containing Hangul or Cyrillic is routed to the matching model
+automatically, so pasted text and OS input methods need no command. Plain ASCII
+lines go to the *active* pair, which starts as `en-es` and is changed with
+`/lang`.
 
 The executable stays running until `Ctrl-C`, `/quit`, `/exit`, or EOF.
 
-## Design
+## Typing Korean and Russian on a US keyboard
 
-- Rust executable
-- Hugging Face Candle for CPU inference
-- Marian / OPUS-MT English -> Spanish
-- Hugging Face Tokenizers
-- No Python at runtime
-- No GPU
-- After the model files have been downloaded, translation is fully offline
-
-Candle has a native Marian-MT implementation. This project adapts its current Marian example into a persistent REPL.
-
-## Windows prerequisites for building
-
-Install:
-
-1. Rust from https://rustup.rs/
-2. Visual Studio Build Tools with **Desktop development with C++**
-3. Git
-
-Then open PowerShell in this directory.
-
-## Build
-
-```powershell
-cargo build --release
-```
-
-The executable will be:
+Switching to a pair whose input is not Latin turns on romanized input, so the
+models are reachable with nothing but the keys already on the keyboard. The
+converted text is echoed above the translation so a misparse is visible rather
+than silently mistranslated:
 
 ```text
-target\release\offline-translator.exe
+> /lang ko-en
+Active pair: Korean -> English  [input: roman]
+
+> annyeonghaseyo
+  안녕하세요
+Hello.
+
+> /lang ru-en
+Active pair: Russian -> English  [input: roman]
+
+> ya lyublyu chitat' knigi.
+  я люблю читать книги.
+I like reading books.
 ```
 
-For a friendlier name:
+`/input raw` turns the conversion off — for pasting real Korean or Russian, or
+for using the Windows Korean IME or Russian keyboard layout (`Win+Space`).
+`/input roman` turns it back on.
+
+### One-time Python step for ko-en and ru-en
+
+`en-es` needs nothing but the download. The other two do, because their upstream
+repositories are older and ship neither of the formats this program reads:
+
+- Their weights are only published as `pytorch_model.bin`, in the pre-1.6
+  PyTorch pickle format — a raw pickle stream rather than the ZIP container
+  Candle reads. They are re-saved as `model.safetensors`.
+- Their tokenizers are only published as `source.spm` / `target.spm` /
+  `vocab.json`. They are converted to `tokenizer.json`.
+
+`--download-model` runs `tools/convert_model.py` for this automatically when
+Python is available. Install its dependencies first:
 
 ```powershell
-Copy-Item target\release\offline-translator.exe .\translate.exe
+pip install "transformers[sentencepiece]" protobuf
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 ```
 
-## Download the model
-
-Put `translate.exe` in the project root, then:
+If Python is not on `PATH`, the download still fetches everything and leaves a
+copy of the script in the pair directory to run by hand:
 
 ```powershell
-.\translate.exe --download-model
+python model\ko-en\convert_model.py model\ko-en
 ```
 
-That creates:
+The script is idempotent, and everything it writes is portable — it can be run
+on one machine and the `model\` directory copied to another. **None of this is
+needed at translation time**; the built executable never calls Python.
 
-```text
-model\
-  model.safetensors
-  tokenizer-marian-base-en-es-en.json
-  tokenizer-marian-base-en-es-es.json
-```
-
-The model is downloaded only during setup. Once these files exist, the machine can be disconnected from the internet.
-
-## Run
-
-```powershell
-.\translate.exe
-```
-
-Then keep entering lines:
-
-```text
-> Where is the nearest airport?
-¿Dónde está el aeropuerto más cercano?
-
-> Please send me the document.
-Por favor, envíame el documento.
-
->
-```
-
-Press `Ctrl-C` whenever you want to stop it.
+Once the model files exist, the machine can be disconnected from the internet.
 
 ## Commands
 
 ```text
-/help
-/clear
-/quit
+/lang <pair>    switch the active pair (en-es, ko-en, ru-en)
+/input roman    type Korean or Russian in ASCII
+/input raw      pass typed text through untouched
+/help           show pairs, commands, and the romanization tables
+/clear          clear the terminal
+/quit           exit
 /exit
 ```
 
 ## Portable deployment
 
-For another Windows computer, copy only:
+For another computer, copy only:
 
 ```text
 translator\
   translate.exe
   model\
-    model.safetensors
-    tokenizer-marian-base-en-es-en.json
-    tokenizer-marian-base-en-es-es.json
+    en-es\
+    ko-en\
+    ru-en\
 ```
 
-No Rust toolchain or Python installation is required on the target computer.
+## Adding a language pair
 
-## Model directory override
+Add an entry to the table in `src/pairs.rs`:
 
-Normally `model\` is expected beside `translate.exe`.
-
-You can override it:
-
-```powershell
-.\translate.exe --model-dir D:\translation-model
+```rust
+PairSpec {
+    id: "de-en",
+    label: "German -> English",
+    model_repo: "Helsinki-NLP/opus-mt-de-en",
+    model_revision: None,
+    tokenizer: TokenizerSource::Convert,
+    script: Script::Latin,
+}
 ```
 
-Download there:
+- `model_revision` pins a non-default branch, which is how `en-es` reaches a
+  safetensors conversion that never landed on `main`.
+- `tokenizer` is `Prebuilt` when converted `tokenizer.json` files already exist
+  on the Hub, and `Convert` when the one-time local step above is needed.
+- `script` is what routes a line to this model automatically. Two pairs reading
+  the same script is fine, but only the first is auto-routed — reach the other
+  with `/lang`.
 
-```powershell
-.\translate.exe --model-dir D:\translation-model --download-model
-```
-
-## Important size note
-
-This version deliberately uses Candle's straightforward FP32 Marian path to keep the code native and maintainable. The executable itself is relatively small, but the model is the dominant part of the package and is substantially larger than a highly optimized INT8 build.
-
-A later optimization step can quantize or switch inference backends if minimizing the model bundle below ~150 MB becomes more important than keeping the implementation this simple.
-
-## Changing language pairs
-
-This initial project is intentionally fixed to English -> Spanish.
-
-Candle currently exposes Marian configurations for several OPUS-MT pairs. To change the pair, update:
-
-- `MODEL_REPO`
-- `MODEL_REVISION`
-- tokenizer filenames/repository if necessary
-- `marian::Config::opus_mt_en_es()`
-
-The upstream Candle Marian example is the best reference for known-working repository/revision/tokenizer combinations.
+A new non-Latin script also needs a converter under `src/input/` and a match arm
+in `input::romanize`, or it will only be usable in `/input raw`.
