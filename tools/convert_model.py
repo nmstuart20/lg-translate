@@ -1,26 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare a downloaded Marian model for the Rust translator.
-
-Two conversions, both one-time and both skipped when already done:
-
-1. **Weights.** Older Helsinki-NLP repos only ship `pytorch_model.bin`, and
-   those files predate PyTorch 1.6 -- they are raw pickle streams rather than
-   the ZIP container that Candle can read. This re-saves them as
-   `model.safetensors`, which Candle memory-maps.
-
-2. **Tokenizers.** Those repos also ship only `source.spm`, `target.spm` and
-   `vocab.json`. The Rust `tokenizers` crate needs the serialized
-   `tokenizer.json` form.
-
-Nothing here runs at translation time; the built executable never needs Python.
-The outputs are portable, so this can be run on one machine and the `model/`
-directory copied to another.
-
-Usage:
-    pip install "transformers[sentencepiece]" protobuf
-    pip install torch --index-url https://download.pytorch.org/whl/cpu
-    python convert_model.py path/to/model/ko-en
-
+"""Prepare a downloaded Marian model for Rust.
 The tokenizer conversion is adapted from the upstream Candle Marian recipe:
 https://huggingface.co/KeighBee/candle-marian/blob/main/convert_tok.py
 """
@@ -146,7 +125,7 @@ def main() -> None:
         "model_dir",
         type=Path,
         nargs="+",
-        help="a downloaded pair directory, e.g. model/ko-en",
+        help="a downloaded pair directory, e.g. model/de-en",
     )
     args = parser.parse_args()
 

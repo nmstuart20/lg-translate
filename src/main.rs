@@ -26,12 +26,12 @@ struct Args {
     #[arg(long)]
     model_dir: Option<PathBuf>,
 
-    /// Download the given pair ("en-es", "ko-en", "ru-en") and exit.
+    /// Download the given pair (e.g. "de-en") and exit.
     /// Pass "all" or omit the value for every pair.
     #[arg(long, value_name = "PAIR", num_args = 0..=1, default_missing_value = "all")]
     download_model: Option<String>,
 
-    /// Language pair to start in.
+    /// Language pair to start in. Without it, the prompt asks for one.
     #[arg(long, value_name = "PAIR")]
     lang: Option<String>,
 
@@ -43,7 +43,8 @@ struct Args {
 struct Session {
     model_dir: PathBuf,
     max_tokens: usize,
-    /// Which pair plain-ASCII lines are translated with.
+    /// The pair every line is translated with, chosen at startup and changed
+    /// only by `/lang`. Nothing about a line's contents can redirect it.
     active: &'static PairSpec,
     /// Loaded lazily so startup only pays for the pairs actually used.
     loaded: HashMap<&'static str, Translator>,
@@ -72,19 +73,6 @@ impl Session {
             .get_mut(pair.id)
             .expect("translator inserted above"))
     }
-
-    /// Decide which model handles `line`.
-    ///
-    /// A line that contains Hangul or Cyrillic -- picked from the palette,
-    /// pasted, or typed with an OS IME -- routes itself. A plain ASCII line
-    /// belongs to the active pair.
-    fn route(&self, line: &str) -> &'static PairSpec {
-        match input::detect(line) {
-            Script::Latin => self.active,
-            // No model for that script; let the active pair try.
-            script => pairs::for_script(script).unwrap_or(self.active),
-        }
-    }
 }
 
 fn default_model_dir() -> Result<PathBuf> {
@@ -95,9 +83,63 @@ fn default_model_dir() -> Result<PathBuf> {
 
 fn resolve_pair(id: &str) -> Result<&'static PairSpec> {
     pairs::find(id).with_context(|| {
-        let known: Vec<&str> = pairs::all().iter().map(|p| p.id).collect();
-        format!("unknown language pair {id:?} (known: {})", known.join(", "))
+        format!(
+            "unknown language pair {id:?} (known: {})",
+            pairs::ids().join(", ")
+        )
     })
+}
+
+/// The pair table, flagging the active one and anything still missing from
+/// disk. Shown both when choosing a pair and by `/help`.
+fn print_pairs(model_dir: &Path, active: Option<&PairSpec>) {
+    for pair in pairs::all() {
+        let marker = match active {
+            Some(active) if active.id == pair.id => "*",
+            _ => " ",
+        };
+        let state = if download::is_ready(pair, model_dir) {
+            ""
+        } else {
+            "  (not downloaded)"
+        };
+        println!("  {marker} {:<6} {}{state}", pair.id, pair.label);
+    }
+}
+
+/// Ask which pair to start in.
+///
+/// There is no default: with several pairs reading the same script, guessing
+/// one would quietly translate German as though it were English, so the
+/// session does not begin until this is answered.
+fn select_pair(editor: &mut Editor, model_dir: &Path) -> Result<Option<&'static PairSpec>> {
+    println!();
+    println!("lg-translator");
+    println!();
+    println!("Select a language pair:");
+    print_pairs(model_dir, None);
+    println!();
+
+    loop {
+        // Latin, so this reads as a plain prompt -- the palette belongs to the
+        // pair being chosen here, which is not known yet.
+        let line = match editor.read_line("pair> ", Script::Latin)? {
+            Line::Text(line) => line,
+            Line::Eof | Line::Interrupted => {
+                println!();
+                return Ok(None);
+            }
+        };
+
+        match line.trim() {
+            "" => continue,
+            "/quit" | "/exit" => return Ok(None),
+            id => match pairs::find(id) {
+                Some(pair) => return Ok(Some(pair)),
+                None => eprintln!("unknown pair {id:?} (known: {})", pairs::ids().join(", ")),
+            },
+        }
+    }
 }
 
 fn print_banner(session: &Session) {
@@ -115,23 +157,12 @@ fn print_banner(session: &Session) {
 fn print_help(session: &Session) {
     println!("Type a line and press Enter to translate it.");
     println!();
-    println!("Plain ASCII lines go to the active pair.");
+    println!("Every line goes to the active pair (*), whatever it is written in.");
+    println!("Switch pairs with /lang before typing in another language.");
     println!();
 
     println!("Pairs:");
-    for pair in pairs::all() {
-        let marker = if pair.id == session.active.id {
-            "*"
-        } else {
-            " "
-        };
-        let state = if download::is_ready(pair, &session.model_dir) {
-            ""
-        } else {
-            "  (not downloaded)"
-        };
-        println!("  {marker} {:<6} {}{state}", pair.id, pair.label);
-    }
+    print_pairs(&session.model_dir, Some(session.active));
     println!();
 
     println!("/lang <pair>    switch the active pair");
@@ -140,25 +171,14 @@ fn print_help(session: &Session) {
     println!("Ctrl-C          exit immediately");
     println!();
 
-    match session.active.script {
-        script if editor::palette_available(script) => {
-            println!("Picking letters:");
-            println!("  Up or Down     open the alphabet under the prompt");
-            println!("  arrow keys     move the highlight around it");
-            println!("  Enter          insert the highlighted letter");
-            println!("  Esc            close it, giving Enter back to the prompt");
-            println!("  typing         also closes it, so commands still work");
-            println!();
-
-            if script == Script::Hangul {
-                println!("Korean is picked one jamo at a time and composed as you go:");
-                println!("  ㅎ ㅏ ㄴ -> 한       a consonant after a vowel becomes the coda");
-                println!("  ㄱ ㅏ ㅁ ㅏ -> 가마   the next vowel takes that coda back");
-                println!("  Backspace removes one jamo, not the whole syllable.");
-                println!();
-            }
-        }
-        _ => {}
+    if editor::palette_available(session.active.script) {
+        println!("Picking letters:");
+        println!("  Up or Down     open the alphabet under the prompt");
+        println!("  arrow keys     move the highlight around it");
+        println!("  Enter          insert the highlighted letter");
+        println!("  Esc            close it, giving Enter back to the prompt");
+        println!("  typing         also closes it, so commands still work");
+        println!();
     }
 }
 
@@ -176,15 +196,15 @@ fn set_lang(session: &mut Session, arg: &str) {
             session.active = pair;
             println!("Active pair: {}\n", pair.label);
         }
-        None => {
-            let known: Vec<&str> = pairs::all().iter().map(|p| p.id).collect();
-            eprintln!("unknown pair {arg:?} (known: {})\n", known.join(", "));
-        }
+        None => eprintln!(
+            "unknown pair {arg:?} (known: {})\n",
+            pairs::ids().join(", ")
+        ),
     }
 }
 
 fn handle_line(session: &mut Session, line: &str) {
-    let pair = session.route(line);
+    let pair = session.active;
 
     match session.translator_for(pair) {
         Ok(translator) => match translator.translate(line) {
@@ -195,14 +215,24 @@ fn handle_line(session: &mut Session, line: &str) {
     }
 }
 
-fn repl(mut session: Session) -> Result<()> {
-    print_banner(&session);
-
+fn repl(model_dir: PathBuf, max_tokens: usize, lang: Option<&'static PairSpec>) -> Result<()> {
     let mut editor = Editor::new();
+
+    let active = match lang {
+        Some(pair) => pair,
+        None => match select_pair(&mut editor, &model_dir)? {
+            Some(pair) => pair,
+            // Gave up at the selection prompt; nothing was loaded.
+            None => return Ok(()),
+        },
+    };
+
+    let mut session = Session::new(model_dir, max_tokens, active);
+    print_banner(&session);
 
     loop {
         // The palette follows the active pair, since that is the script the
-        // next plain line will be read as.
+        // next line is expected to be in.
         let line = match editor.read_line("> ", session.active.script)? {
             Line::Text(line) => line,
             // EOF also exits cleanly (e.g. Ctrl-Z then Enter on Windows).
@@ -288,10 +318,7 @@ fn main() -> Result<()> {
         return download_pairs(&selector, &model_dir);
     }
 
-    let active = match args.lang.as_deref() {
-        Some(id) => resolve_pair(id)?,
-        None => pairs::default_pair(),
-    };
+    let lang = args.lang.as_deref().map(resolve_pair).transpose()?;
 
-    repl(Session::new(model_dir, args.max_tokens, active))
+    repl(model_dir, args.max_tokens, lang)
 }

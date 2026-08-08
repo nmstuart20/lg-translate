@@ -1,7 +1,7 @@
 //! The set of translation directions this build knows how to fetch and run.
 //!
 //! Candle only ships hardcoded `marian::Config` constructors for a handful of
-//! OPUS-MT pairs, and none for ko-en or ru-en. `marian::Config` derives
+//! OPUS-MT pairs, and none for most of the ones here. `marian::Config` derives
 //! `serde::Deserialize` though, so we download each model's `config.json`
 //! instead of hardcoding anything -- adding a pair is then a table entry.
 
@@ -47,16 +47,15 @@ pub struct PairSpec {
     pub model_repo: &'static str,
     pub model_revision: Option<&'static str>,
     pub tokenizer: TokenizerSource,
-    /// Script the model expects on its input side, used to auto-route lines.
     pub script: Script,
 }
 
+/// The order the selection prompt and `/help` list them in.
 static PAIRS: &[PairSpec] = &[
     PairSpec {
         id: "en-es",
         label: "English -> Spanish",
         model_repo: "Helsinki-NLP/opus-mt-en-es",
-        // The main branch has no safetensors; this PR branch added them.
         model_revision: Some("refs/pr/4"),
         tokenizer: TokenizerSource::Prebuilt {
             repo: "KeighBee/candle-marian",
@@ -66,12 +65,28 @@ static PAIRS: &[PairSpec] = &[
         script: Script::Latin,
     },
     PairSpec {
-        id: "ko-en",
-        label: "Korean -> English",
-        model_repo: "Helsinki-NLP/opus-mt-ko-en",
+        id: "de-en",
+        label: "German -> English",
+        model_repo: "Helsinki-NLP/opus-mt-de-en",
         model_revision: None,
         tokenizer: TokenizerSource::Convert,
-        script: Script::Hangul,
+        script: Script::Latin,
+    },
+    PairSpec {
+        id: "el-en",
+        label: "Greek -> English",
+        model_repo: "Helsinki-NLP/opus-mt-grk-en",
+        model_revision: None,
+        tokenizer: TokenizerSource::Convert,
+        script: Script::Greek,
+    },
+    PairSpec {
+        id: "es-en",
+        label: "Spanish -> English",
+        model_repo: "Helsinki-NLP/opus-mt-es-en",
+        model_revision: None,
+        tokenizer: TokenizerSource::Convert,
+        script: Script::Latin,
     },
     PairSpec {
         id: "ru-en",
@@ -91,11 +106,7 @@ pub fn find(id: &str) -> Option<&'static PairSpec> {
     PAIRS.iter().find(|p| p.id.eq_ignore_ascii_case(id))
 }
 
-/// The pair that takes `script` as its input, used when a line auto-routes.
-pub fn for_script(script: Script) -> Option<&'static PairSpec> {
-    PAIRS.iter().find(|p| p.script == script)
-}
-
-pub fn default_pair() -> &'static PairSpec {
-    &PAIRS[0]
+/// Every known id, for the messages that have to name them all.
+pub fn ids() -> Vec<&'static str> {
+    PAIRS.iter().map(|p| p.id).collect()
 }

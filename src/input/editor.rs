@@ -26,7 +26,7 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 
-use super::{display_width, display_width_char, hangul, palette, Script};
+use super::{display_width, display_width_char, palette, Script};
 
 pub enum Line {
     Text(String),
@@ -40,7 +40,7 @@ pub enum Line {
 const FALLBACK_SIZE: (u16, u16) = (80, 24);
 
 pub struct Editor {
-    /// Where the highlight sits, remembered across lines so a second Korean
+    /// Where the highlight sits, remembered across lines so a second Russian
     /// line resumes browsing where the first one left off.
     selected: usize,
 }
@@ -72,7 +72,7 @@ impl Editor {
         }
 
         let _raw = RawMode::enable()?;
-        self.edit(prompt, palette, script)
+        self.edit(prompt, palette)
     }
 }
 
@@ -86,43 +86,17 @@ impl Default for Editor {
 struct Buffer {
     chars: Vec<char>,
     cursor: usize,
-    script: Script,
 }
 
 impl Buffer {
-    /// Insert a picked symbol. At the end of the line Hangul jamo compose into
-    /// syllables; anywhere else -- editing back into finished text -- they go
-    /// in as they are, since there is no syllable in progress to join.
-    fn insert_symbol(&mut self, symbol: char) {
-        if self.script == Script::Hangul && self.cursor == self.chars.len() {
-            let before = self.chars.len();
-            hangul::push(&mut self.chars, symbol);
-            // Composition can merge into the previous character instead of
-            // adding one, or split one syllable into two.
-            self.cursor = self.chars.len().max(before);
-            return;
-        }
-
-        self.insert_char(symbol);
-    }
-
+    /// Insert one character, typed or picked from the grid. Every script here
+    /// writes one letter per symbol, so a pick is just an insert.
     fn insert_char(&mut self, ch: char) {
         self.chars.insert(self.cursor, ch);
         self.cursor += 1;
     }
 
     fn backspace(&mut self) {
-        // At the end of a Korean line, take back one jamo rather than a whole
-        // syllable, so a wrong coda costs one keystroke to fix.
-        if self.script == Script::Hangul && self.cursor == self.chars.len() {
-            let mut tail = self.chars.clone();
-            if hangul::backspace(&mut tail) {
-                self.chars = tail;
-                self.cursor = self.chars.len();
-                return;
-            }
-        }
-
         if self.cursor > 0 {
             self.cursor -= 1;
             self.chars.remove(self.cursor);
@@ -135,11 +109,10 @@ impl Buffer {
 }
 
 impl Editor {
-    fn edit(&mut self, prompt: &str, palette: &palette::Palette, script: Script) -> Result<Line> {
+    fn edit(&mut self, prompt: &str, palette: &palette::Palette) -> Result<Line> {
         let mut buffer = Buffer {
             chars: Vec::new(),
             cursor: 0,
-            script,
         };
         // Every line starts closed, so Enter always submits until it is asked
         // for. The highlight position survives; the open state does not.
@@ -191,7 +164,7 @@ impl Editor {
 
             // The palette owns Enter while it is open; that is what "open"
             // means, and Esc is how it is handed back.
-            KeyCode::Enter if *open => buffer.insert_symbol(palette.symbols[self.selected]),
+            KeyCode::Enter if *open => buffer.insert_char(palette.symbols[self.selected]),
             KeyCode::Enter => return Action::Submit,
             KeyCode::Esc => *open = false,
 
@@ -451,93 +424,37 @@ fn read_plain(prompt: &str) -> Result<Line> {
 mod tests {
     use super::*;
 
-    fn buffer(text: &str, script: Script) -> Buffer {
+    fn buffer(text: &str) -> Buffer {
         let chars: Vec<char> = text.chars().collect();
         Buffer {
             cursor: chars.len(),
             chars,
-            script,
         }
     }
 
     #[test]
-    fn picked_jamo_compose_at_the_end_of_the_line() {
-        let mut buf = buffer("", Script::Hangul);
-        for jamo in "ㅎㅏㄴ".chars() {
-            buf.insert_symbol(jamo);
+    fn picked_symbols_go_in_where_the_cursor_is() {
+        let mut buf = buffer("");
+        for symbol in "γειά".chars() {
+            buf.insert_char(symbol);
         }
-        assert_eq!(buf.text(), "한");
-        assert_eq!(buf.cursor, buf.chars.len());
-    }
+        assert_eq!(buf.text(), "γειά");
 
-    #[test]
-    fn picked_jamo_are_literal_when_editing_mid_line() {
-        let mut buf = buffer("한국", Script::Hangul);
         buf.cursor = 1;
-        buf.insert_symbol('ㅁ');
-        assert_eq!(buf.text(), "한ㅁ국");
+        buf.insert_char('б');
+        assert_eq!(buf.text(), "γбειά");
         assert_eq!(buf.cursor, 2);
     }
 
     #[test]
-    fn cyrillic_symbols_insert_verbatim() {
-        let mut buf = buffer("", Script::Cyrillic);
-        for symbol in "привет".chars() {
-            buf.insert_symbol(symbol);
-        }
-        assert_eq!(buf.text(), "привет");
-    }
-
-    #[test]
-    fn backspace_peels_jamo_then_characters() {
-        let mut buf = buffer("한", Script::Hangul);
-        buf.backspace();
-        assert_eq!(buf.text(), "하");
-        buf.backspace();
-        assert_eq!(buf.text(), "ㅎ");
-        buf.backspace();
-        assert_eq!(buf.text(), "");
-
-        let mut buf = buffer("да", Script::Cyrillic);
+    fn backspace_removes_one_character() {
+        let mut buf = buffer("да");
         buf.backspace();
         assert_eq!(buf.text(), "д");
-    }
-
-    #[test]
-    fn wide_symbols_get_narrower_grid_rows() {
-        let cyrillic = palette::for_script(Script::Cyrillic).unwrap();
-        let hangul = palette::for_script(Script::Hangul).unwrap();
-        assert!(grid_columns(hangul, 80) < grid_columns(cyrillic, 80));
-        // Even an absurdly narrow terminal gets a usable grid.
-        assert!(grid_columns(hangul, 20) >= 1);
-    }
-
-    #[test]
-    fn a_grid_row_always_fits_the_terminal() {
-        for width in [20usize, 40, 80, 120] {
-            for palette in [
-                palette::for_script(Script::Cyrillic).unwrap(),
-                palette::for_script(Script::Hangul).unwrap(),
-            ] {
-                let row = 2 + grid_columns(palette, width) * palette.cell_width();
-                assert!(row < width, "row {row} overflows width {width}");
-            }
-        }
-    }
-
-    #[test]
-    fn the_cursor_column_tracks_double_width_text() {
-        let buf = buffer("한국", Script::Hangul);
-        let (visible, column) = visible_text("> ", &buf, 80);
-        assert_eq!(visible, "> 한국");
-        assert_eq!(column, 6);
-    }
-
-    #[test]
-    fn long_lines_scroll_instead_of_wrapping() {
-        let buf = buffer(&"а".repeat(60), Script::Cyrillic);
-        let (visible, column) = visible_text("> ", &buf, 20);
-        assert!(display_width(&visible) < 20);
-        assert!(column < 20);
+        buf.backspace();
+        assert_eq!(buf.text(), "");
+        // Nothing left to remove, and no underflow.
+        buf.backspace();
+        assert_eq!(buf.text(), "");
     }
 }

@@ -39,16 +39,20 @@ const CYRILLIC: &[char] = &[
     'Х', 'Ц', 'Ч', 'Ш', 'Щ', 'Ъ', 'Ы', 'Ь', 'Э', 'Ю', 'Я',
 ];
 
-/// Korean jamo: the 19 consonants that can open a syllable, then the 21
-/// vowels. Codas are not listed -- picking a consonant after a vowel makes it
-/// one, and the cluster codas (ㄳ, ㄺ, ...) form from two consonants in a row,
-/// so everything writable is reachable from these 40 (see [`super::hangul`]).
+/// Greek, lowercase then uppercase, each followed by its accented vowels.
+///
+/// The accents are not decoration: modern Greek writes a tonos on every
+/// polysyllabic word, and the model was trained on text that has them. Both
+/// sigmas are listed, since which one a word ends with is not something the
+/// grid can decide.
 #[rustfmt::skip]
-const HANGUL: &[char] = &[
-    'ㄱ', 'ㄲ', 'ㄴ', 'ㄷ', 'ㄸ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅃ', 'ㅅ',
-    'ㅆ', 'ㅇ', 'ㅈ', 'ㅉ', 'ㅊ', 'ㅋ', 'ㅌ', 'ㅍ', 'ㅎ',
-    'ㅏ', 'ㅐ', 'ㅑ', 'ㅒ', 'ㅓ', 'ㅔ', 'ㅕ', 'ㅖ', 'ㅗ', 'ㅘ',
-    'ㅙ', 'ㅚ', 'ㅛ', 'ㅜ', 'ㅝ', 'ㅞ', 'ㅟ', 'ㅠ', 'ㅡ', 'ㅢ', 'ㅣ',
+const GREEK: &[char] = &[
+    'α', 'β', 'γ', 'δ', 'ε', 'ζ', 'η', 'θ', 'ι', 'κ', 'λ', 'μ',
+    'ν', 'ξ', 'ο', 'π', 'ρ', 'σ', 'ς', 'τ', 'υ', 'φ', 'χ', 'ψ', 'ω',
+    'ά', 'έ', 'ή', 'ί', 'ό', 'ύ', 'ώ', 'ϊ', 'ϋ', 'ΐ', 'ΰ',
+    'Α', 'Β', 'Γ', 'Δ', 'Ε', 'Ζ', 'Η', 'Θ', 'Ι', 'Κ', 'Λ', 'Μ',
+    'Ν', 'Ξ', 'Ο', 'Π', 'Ρ', 'Σ', 'Τ', 'Υ', 'Φ', 'Χ', 'Ψ', 'Ω',
+    'Ά', 'Έ', 'Ή', 'Ί', 'Ό', 'Ύ', 'Ώ', 'Ϊ', 'Ϋ',
 ];
 
 static CYRILLIC_PALETTE: Palette = Palette {
@@ -56,9 +60,9 @@ static CYRILLIC_PALETTE: Palette = Palette {
     symbols: CYRILLIC,
 };
 
-static HANGUL_PALETTE: Palette = Palette {
-    label: "Korean",
-    symbols: HANGUL,
+static GREEK_PALETTE: Palette = Palette {
+    label: "Greek",
+    symbols: GREEK,
 };
 
 /// The palette for `script`, or `None` for Latin, which the keyboard already
@@ -67,7 +71,7 @@ pub fn for_script(script: Script) -> Option<&'static Palette> {
     match script {
         Script::Latin => None,
         Script::Cyrillic => Some(&CYRILLIC_PALETTE),
-        Script::Hangul => Some(&HANGUL_PALETTE),
+        Script::Greek => Some(&GREEK_PALETTE),
     }
 }
 
@@ -88,10 +92,12 @@ mod tests {
     }
 
     #[test]
-    fn hangul_lists_onsets_then_vowels() {
-        let palette = for_script(Script::Hangul).unwrap();
-        assert_eq!(palette.symbols.len(), 40);
-        // Wide symbols, so the cells are one column wider than Cyrillic's.
-        assert_eq!(palette.cell_width(), 4);
+    fn greek_covers_both_cases_and_their_accents() {
+        let palette = for_script(Script::Greek).unwrap();
+        assert_eq!(palette.symbols.len(), 69);
+        assert_eq!(palette.cell_width(), 3);
+        // The tonos vowels are what a modern Greek line actually needs.
+        assert!(palette.symbols.contains(&'ή'));
+        assert!(palette.symbols.contains(&'ς'));
     }
 }
