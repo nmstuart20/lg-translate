@@ -106,12 +106,7 @@ fn fetch(repo: &Repo, name: &str, pair_dir: &Path) -> Result<PathBuf> {
     fetch_as(repo, name, pair_dir, name)
 }
 
-fn fetch_as(
-    repo: &Repo,
-    remote_name: &str,
-    pair_dir: &Path,
-    local_name: &str,
-) -> Result<PathBuf> {
+fn fetch_as(repo: &Repo, remote_name: &str, pair_dir: &Path, local_name: &str) -> Result<PathBuf> {
     let url = repo.url(remote_name);
     let mut response = ureq::get(&url)
         .call()
@@ -130,8 +125,13 @@ fn fetch_as(
     let mut file = fs::File::create(&partial)
         .with_context(|| format!("failed to create {}", partial.display()))?;
 
-    copy_with_progress(response.body_mut().as_reader(), &mut file, local_name, total)
-        .with_context(|| format!("failed while downloading {url}"))?;
+    copy_with_progress(
+        response.body_mut().as_reader(),
+        &mut file,
+        local_name,
+        total,
+    )
+    .with_context(|| format!("failed while downloading {url}"))?;
     drop(file);
 
     fs::rename(&partial, &destination)
