@@ -27,8 +27,6 @@ impl Palette {
     }
 }
 
-/// Russian, lowercase then uppercase. Both cases are in the one grid rather
-/// than behind a shift toggle, so every reachable letter is on screen.
 #[rustfmt::skip]
 const CYRILLIC: &[char] = &[
     'а', 'б', 'в', 'г', 'д', 'е', 'ё', 'ж', 'з', 'и', 'й',
@@ -39,12 +37,6 @@ const CYRILLIC: &[char] = &[
     'Х', 'Ц', 'Ч', 'Ш', 'Щ', 'Ъ', 'Ы', 'Ь', 'Э', 'Ю', 'Я',
 ];
 
-/// Greek, lowercase then uppercase, each followed by its accented vowels.
-///
-/// The accents are not decoration: modern Greek writes a tonos on every
-/// polysyllabic word, and the model was trained on text that has them. Both
-/// sigmas are listed, since which one a word ends with is not something the
-/// grid can decide.
 #[rustfmt::skip]
 const GREEK: &[char] = &[
     'α', 'β', 'γ', 'δ', 'ε', 'ζ', 'η', 'θ', 'ι', 'κ', 'λ', 'μ',
