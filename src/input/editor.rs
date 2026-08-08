@@ -1,20 +1,4 @@
 //! The prompt: a small raw-mode line editor with a symbol palette attached.
-//!
-//! Typing works the way it does at any prompt. What is added is a grid of the
-//! active script's symbols under the line: the arrow keys move a highlight
-//! around it and Enter drops the highlighted symbol into the text. Nothing is
-//! translated from Latin on the way in -- the grid shows the actual letters,
-//! and picking one inserts that letter.
-//!
-//! The grid is hidden until an arrow key asks for it, so a line of ASCII (a
-//! command, or English for a Latin-input pair) is typed without anything in the
-//! way. Once it is open, Enter belongs to the palette, so Esc closes it and
-//! gives Enter back to the prompt. Typing a character does the same, which
-//! keeps "type a command, press Enter" working without a detour.
-//!
-//! Everything degrades: without a palette for the script, or without a real
-//! terminal on stdin (a pipe, a redirect), this falls back to a plain read.
-
 use std::io::{self, IsTerminal, Write};
 
 use anyhow::Result;
