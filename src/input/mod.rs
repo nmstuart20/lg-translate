@@ -40,8 +40,6 @@ mod tests {
         assert_eq!(display_width("hi"), 2);
         assert_eq!(display_width("привет"), 6);
         assert_eq!(display_width("καλημέρα"), 8);
-        // Pasted wide characters still have to be measured, even with no
-        // double-width palette left.
         assert_eq!(display_width("東京"), 4);
     }
 }
