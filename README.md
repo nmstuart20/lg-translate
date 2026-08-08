@@ -61,7 +61,7 @@ while `es-en` is active is translated as though it were Spanish. Switch with
 
 ```text
 /lang <pair>    switch the active pair
-                (en-es, de-en, el-en, es-en, ru-en)
+                (en-es, de-en, el-en, es-en, ru-en, sv-en)
 /help           show pairs, commands, and the palette keys
 /clear          clear the terminal
 /quit           exit

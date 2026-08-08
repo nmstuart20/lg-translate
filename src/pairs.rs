@@ -96,6 +96,14 @@ static PAIRS: &[PairSpec] = &[
         tokenizer: TokenizerSource::Convert,
         script: Script::Cyrillic,
     },
+    PairSpec {
+        id: "sv-en",
+        label: "Swedish -> English",
+        model_repo: "Helsinki-NLP/opus-mt-sv-en",
+        model_revision: None,
+        tokenizer: TokenizerSource::Convert,
+        script: Script::Latin,
+    },
 ];
 
 pub fn all() -> &'static [PairSpec] {
