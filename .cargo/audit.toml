@@ -1,0 +1,10 @@
+# `paste` (RUSTSEC-2024-0436) is unmaintained but not removable: it is a
+# non-optional dependency of both `tokenizers` and of `gemm`, which
+# `candle-core` pulls in unconditionally. No feature flag turns it off, so the
+# only way out is dropping Candle. It is a proc macro that concatenates
+# identifiers at compile time and contributes no code to the binary.
+#
+# Revisit when Candle and `tokenizers` move off it.
+
+[advisories]
+ignore = ["RUSTSEC-2024-0436"]

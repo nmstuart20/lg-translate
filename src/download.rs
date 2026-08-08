@@ -1,9 +1,9 @@
 //! One-time setup: fetch each pair's weights, config and tokenizers.
 
 use anyhow::{bail, Context, Result};
-use hf_hub::{api::sync::Api, Repo, RepoType};
 use std::{
     fs,
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -15,6 +15,31 @@ use crate::pairs::{self, PairSpec, TokenizerSource};
 const CONVERTER: &str = include_str!("../tools/convert_model.py");
 const CONVERTER_NAME: &str = "convert_model.py";
 
+const HUB_ENDPOINT: &str = "https://huggingface.co";
+
+/// A Hub repository at a pinned revision -- everything needed to build the
+/// download URL for one of its files.
+struct Repo {
+    id: &'static str,
+    revision: &'static str,
+}
+
+impl Repo {
+    fn new(id: &'static str, revision: Option<&'static str>) -> Self {
+        Repo {
+            id,
+            revision: revision.unwrap_or("main"),
+        }
+    }
+
+    fn url(&self, file: &str) -> String {
+        // A revision is one path segment, so the slashes in the likes of
+        // `refs/pr/4` have to be escaped rather than passed through.
+        let revision = self.revision.replace('/', "%2F");
+        format!("{HUB_ENDPOINT}/{}/resolve/{revision}/{file}", self.id)
+    }
+}
+
 pub fn download(pair: &PairSpec, model_dir: &Path) -> Result<()> {
     let pair_dir = model_dir.join(pair.id);
     fs::create_dir_all(&pair_dir)?;
@@ -22,16 +47,7 @@ pub fn download(pair: &PairSpec, model_dir: &Path) -> Result<()> {
     println!("Downloading {} ({})...", pair.label, pair.model_repo);
     println!("Destination: {}", pair_dir.display());
 
-    let api = Api::new().context("failed to initialize Hugging Face client")?;
-
-    let model_repo = match pair.model_revision {
-        Some(revision) => api.repo(Repo::with_revision(
-            pair.model_repo.to_string(),
-            RepoType::Model,
-            revision.to_string(),
-        )),
-        None => api.model(pair.model_repo.to_string()),
-    };
+    let model_repo = Repo::new(pair.model_repo, pair.model_revision);
 
     fetch(&model_repo, pairs::CONFIG_FILE, &pair_dir)?;
 
@@ -56,7 +72,7 @@ pub fn download(pair: &PairSpec, model_dir: &Path) -> Result<()> {
             source,
             target,
         } => {
-            let tokenizer_repo = api.model(repo.to_string());
+            let tokenizer_repo = Repo::new(repo, None);
             fetch_as(
                 &tokenizer_repo,
                 source,
@@ -86,29 +102,90 @@ pub fn download(pair: &PairSpec, model_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn fetch(repo: &hf_hub::api::sync::ApiRepo, name: &str, pair_dir: &Path) -> Result<PathBuf> {
+fn fetch(repo: &Repo, name: &str, pair_dir: &Path) -> Result<PathBuf> {
     fetch_as(repo, name, pair_dir, name)
 }
 
 fn fetch_as(
-    repo: &hf_hub::api::sync::ApiRepo,
+    repo: &Repo,
     remote_name: &str,
     pair_dir: &Path,
     local_name: &str,
 ) -> Result<PathBuf> {
-    let cached = repo.get(remote_name)?;
-    let destination = pair_dir.join(local_name);
+    let url = repo.url(remote_name);
+    let mut response = ureq::get(&url)
+        .call()
+        .with_context(|| format!("failed to download {url}"))?;
 
-    fs::copy(&cached, &destination).with_context(|| {
-        format!(
-            "failed copying {} to {}",
-            cached.display(),
-            destination.display()
-        )
-    })?;
+    let total = response
+        .headers()
+        .get("content-length")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+
+    // Download alongside the destination and rename once complete, so an
+    // interrupted setup cannot leave a truncated file that `is_ready` accepts.
+    let destination = pair_dir.join(local_name);
+    let partial = pair_dir.join(format!("{local_name}.part"));
+    let mut file = fs::File::create(&partial)
+        .with_context(|| format!("failed to create {}", partial.display()))?;
+
+    copy_with_progress(response.body_mut().as_reader(), &mut file, local_name, total)
+        .with_context(|| format!("failed while downloading {url}"))?;
+    drop(file);
+
+    fs::rename(&partial, &destination)
+        .with_context(|| format!("failed to write {}", destination.display()))?;
 
     println!("  {}", destination.display());
     Ok(destination)
+}
+
+fn copy_with_progress(
+    mut reader: impl Read,
+    mut sink: impl Write,
+    label: &str,
+    total: Option<u64>,
+) -> io::Result<()> {
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut done: u64 = 0;
+    let mut drawn: u64 = 0;
+
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        sink.write_all(&buffer[..read])?;
+        done += read as u64;
+
+        // Redraw once per megabyte; the weights are the only files big enough
+        // for this to show up at all, and the terminal is the slow part.
+        if done - drawn >= 1 << 20 {
+            drawn = done;
+            match total {
+                Some(total) if total > 0 => print!(
+                    "\r  {label}  {} / {} ({}%)",
+                    megabytes(done),
+                    megabytes(total),
+                    done * 100 / total
+                ),
+                _ => print!("\r  {label}  {}", megabytes(done)),
+            }
+            let _ = io::stdout().flush();
+        }
+    }
+
+    sink.flush()?;
+    if drawn > 0 {
+        // Clear the progress line so the final path below replaces it.
+        print!("\r\x1b[2K");
+    }
+    Ok(())
+}
+
+fn megabytes(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / 1_000_000.0)
 }
 
 /// Run the bundled converter, which re-saves legacy PyTorch weights as

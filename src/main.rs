@@ -21,8 +21,8 @@ use pairs::PairSpec;
 #[derive(Parser, Debug)]
 #[command(name = "translate", version, about = "Small offline translator")]
 struct Args {
-    /// Directory holding one subdirectory per language pair.
-    /// Defaults to a "model" folder beside translate.exe.
+    /// Directory that holds model subdirectories
+    /// defaults to a "model" folder beside executable
     #[arg(long)]
     model_dir: Option<PathBuf>,
 
@@ -31,7 +31,7 @@ struct Args {
     #[arg(long, value_name = "PAIR", num_args = 0..=1, default_missing_value = "all")]
     download_model: Option<String>,
 
-    /// Language pair to start in. Without it, the prompt asks for one.
+    /// Language pair the cli with. Without it, the prompt asks for one.
     #[arg(long, value_name = "PAIR")]
     lang: Option<String>,
 
@@ -43,8 +43,7 @@ struct Args {
 struct Session {
     model_dir: PathBuf,
     max_tokens: usize,
-    /// The pair every line is translated with, chosen at startup and changed
-    /// only by `/lang`. Nothing about a line's contents can redirect it.
+    /// The active language being translated
     active: &'static PairSpec,
     /// Loaded lazily so startup only pays for the pairs actually used.
     loaded: HashMap<&'static str, Translator>,
@@ -107,11 +106,7 @@ fn print_pairs(model_dir: &Path, active: Option<&PairSpec>) {
     }
 }
 
-/// Ask which pair to start in.
-///
-/// There is no default: with several pairs reading the same script, guessing
-/// one would quietly translate German as though it were English, so the
-/// session does not begin until this is answered.
+/// Ask user which language pair to use if no pair was passed as an argument
 fn select_pair(editor: &mut Editor, model_dir: &Path) -> Result<Option<&'static PairSpec>> {
     println!();
     println!("lg-translator");

@@ -7,10 +7,11 @@ edition = "2021"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
-hf-hub = "0.4"
 serde_json = "1"
 tokenizers = "0.23.1"
 unicode-width = "0.2"
+# Setup-only HTTP. rustls keeps the build free of a system OpenSSL.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 # Keep the Candle crates on the same revision/API.
 candle-core = { git = "https://github.com/huggingface/candle.git", package = "candle-core" }
