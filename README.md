@@ -68,9 +68,9 @@ while `es-en` is active is translated as though it were Spanish. Switch with
 /exit
 ```
 
-## Portable deployment
+## Offline deploy
 
-For another computer, copy only:
+Copy over executable and model
 
 ```text
 translator\
