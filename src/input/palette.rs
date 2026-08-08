@@ -8,7 +8,6 @@
 use super::Script;
 
 pub struct Palette {
-    /// Shown above the grid, e.g. "Russian".
     pub label: &'static str,
     pub symbols: &'static [char],
 }

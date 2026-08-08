@@ -270,9 +270,6 @@ fn download_pairs(selector: &str, model_dir: &Path) -> Result<()> {
         vec![resolve_pair(selector)?]
     };
 
-    // One pair failing -- most often because the conversion step found no
-    // Python to run -- should not throw away the pairs that did work, so each
-    // is reported and the rest still run.
     let mut failed: Vec<&'static PairSpec> = Vec::new();
 
     for pair in &selected {

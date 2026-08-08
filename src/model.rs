@@ -247,8 +247,7 @@ fn split_sentences(text: &str, script: Script) -> Vec<&str> {
 }
 
 fn load_weights(path: &Path, device: &Device) -> Result<VarBuilder<'static>> {
-    // SAFETY:
-    // Candle memory-maps the safetensors file. The file is only read, not modified,
+    // Rust candle memory-maps the safetensors file. The file is only read, not modified,
     // and remains present on disk for the lifetime of the model.
     unsafe {
         VarBuilder::from_mmaped_safetensors(&[path], DType::F32, device)

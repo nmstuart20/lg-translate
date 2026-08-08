@@ -17,8 +17,7 @@ const CONVERTER_NAME: &str = "convert_model.py";
 
 const HUB_ENDPOINT: &str = "https://huggingface.co";
 
-/// A Hub repository at a pinned revision -- everything needed to build the
-/// download URL for one of its files.
+/// Everything needed to build the download URL for one of its files.
 struct Repo {
     id: &'static str,
     revision: &'static str,
@@ -159,8 +158,7 @@ fn copy_with_progress(
         sink.write_all(&buffer[..read])?;
         done += read as u64;
 
-        // Redraw once per megabyte; the weights are the only files big enough
-        // for this to show up at all, and the terminal is the slow part.
+        // Redraw once per megabyte for the progress reporting
         if done - drawn >= 1 << 20 {
             drawn = done;
             match total {
@@ -190,10 +188,6 @@ fn megabytes(bytes: u64) -> String {
 
 /// Run the bundled converter, which re-saves legacy PyTorch weights as
 /// safetensors and turns `.spm` files into `tokenizer.json`.
-///
-/// This is the one step that needs Python, and only at setup. If it cannot run
-/// here, the script is left on disk so it can be run by hand -- possibly on a
-/// different machine, since everything it produces is portable.
 fn convert(pair_dir: &Path) -> Result<()> {
     let script = pair_dir.join(CONVERTER_NAME);
     fs::write(&script, CONVERTER)
@@ -222,9 +216,7 @@ fn convert(pair_dir: &Path) -> Result<()> {
          \x20   pip install \"transformers[sentencepiece]\" protobuf\n\
          \x20   pip install torch --index-url https://download.pytorch.org/whl/cpu\n\
          \x20   python {} {}\n\n\
-         It is idempotent, so re-running it is safe. Everything it writes is\n\
-         portable, so it can also be run on another machine and the resulting\n\
-         directory copied across.",
+         ",
         script.display(),
         pair_dir.display(),
     )
