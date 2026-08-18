@@ -42,9 +42,6 @@ impl Translator {
 
         let device = Device::Cpu;
 
-        // `marian::Config` derives Deserialize, so every OPUS-MT pair is
-        // described by its own `config.json`. Nothing here is pair-specific,
-        // which is what lets the table in `pairs.rs` stay data-only.
         let config: marian::Config = serde_json::from_str(
             &fs::read_to_string(&config_path)
                 .with_context(|| format!("failed to read {}", config_path.display()))?,
@@ -72,17 +69,14 @@ impl Translator {
         })
     }
 
-    /// Translate one line, a sentence at a time.
+    /// Translate a sentence at a time.
     ///
-    /// Marian is a sentence-level model. Given several sentences at once it
-    /// frequently translates the first and silently drops the rest, so the
-    /// line is split and each sentence is fed through on its own.
+    /// Marian is a sentence-level model so we need to conbine translated lines back into sentences.
     pub fn translate(&mut self, text: &str) -> Result<String> {
         let mut translated = Vec::new();
 
         for sentence in split_sentences(text, self.script) {
-            // Punctuation alone has nothing to translate, and the model
-            // answers it with invented text, so it is passed through as typed.
+            // Don't feed punctuation to the model
             if sentence.chars().any(char::is_alphanumeric) {
                 translated.push(self.translate_sentence(sentence)?);
             } else {
@@ -115,7 +109,7 @@ impl Translator {
 
         let mut token_ids = vec![self.config.decoder_start_token_id];
 
-        // Greedy decoding. For a utility translator this is deterministic and cheap.
+        // Greedy decoding for now to keep it simple
         let mut logits_processor = LogitsProcessor::new(0, None, None);
 
         for index in 0..self.max_tokens {
