@@ -63,14 +63,12 @@ To switch languages during run-time use the `/lang` command.
 
 ## Offline deploy
 
-Copy over executable and model
+Copy over the executable and model directory:
 
 ```text
 translator\
-  translate.exe
+  lg-translate.exe
   model\
     en-es\
     de-en\
-    el-en\
-    ...
 ```

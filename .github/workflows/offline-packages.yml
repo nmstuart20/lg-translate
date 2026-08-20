@@ -1,0 +1,93 @@
+name: Offline deployment packages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    name: Package ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux x86_64
+            os: ubuntu-latest
+            executable: target/release/lg-translate
+            package: lg-translate-linux-x86_64
+            archive: lg-translate-linux-x86_64.tar.gz
+          - platform: Windows x86_64
+            os: windows-latest
+            executable: target/release/lg-translate.exe
+            package: lg-translate-windows-x86_64
+            archive: lg-translate-windows-x86_64.zip
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install model conversion dependencies
+        shell: bash
+        run: |
+          python -m pip install 'transformers[sentencepiece]==4.57.6' 'protobuf==6.33.6'
+          python -m pip install 'torch==2.8.0' --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Build release executable
+        run: cargo build --release --locked
+
+      - name: Download offline models
+        shell: bash
+        run: |
+          set -euo pipefail
+          for pair in de-en ru-en en-es; do
+            "${{ matrix.executable }}" --model-dir model --download-model "$pair"
+          done
+
+      - name: Stage offline package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ matrix.package }}/model"
+          cp "${{ matrix.executable }}" "${{ matrix.package }}/"
+
+          for pair in de-en ru-en en-es; do
+            mkdir -p "${{ matrix.package }}/model/$pair"
+            for file in config.json model.safetensors tokenizer-source.json tokenizer-target.json; do
+              cp "model/$pair/$file" "${{ matrix.package }}/model/$pair/$file"
+            done
+          done
+
+      - name: Create Linux archive
+        if: runner.os == 'Linux'
+        run: tar -czf "${{ matrix.archive }}" "${{ matrix.package }}"
+
+      - name: Create Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path '${{ matrix.package }}' -DestinationPath '${{ matrix.archive }}'
+
+      - name: Upload offline package
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.package }}
+          path: ${{ matrix.archive }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
