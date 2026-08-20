@@ -12,10 +12,6 @@ cargo build --release
 
 **2. Install Python transformers and torch**
 
-Every pair except `en-es` needs a one-time conversion step, because their
-upstream repos ship their weights and tokenizers in formats this program can't
-read.
-
 You may need to create a python virtual environement.
 
 ```bash
@@ -41,7 +37,7 @@ One per pair you want, or `--download-model all` for every one of them.
 
 ## Picking a pair
 
-There is no default direction. Startup lists the pairs and waits for one:
+If the `--lang de-en` is passed in, the program will ask the user to select a language pair:
 
 ```text
 Select a language pair:
@@ -52,10 +48,7 @@ Select a language pair:
 pair> de-en
 ```
 
-`--lang de-en` skips the question. Whatever is chosen, **every line goes to
-that pair** — nothing is inferred from what you type, so a German line typed
-while `es-en` is active is translated as though it were Spanish. Switch with
-`/lang` before switching languages.
+To switch languages during run-time use the `/lang` command.
 
 ## Commands
 
